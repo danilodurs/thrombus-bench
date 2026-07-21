@@ -3,26 +3,17 @@
 Responsibility
 ---------------
 Matplotlib plotting functions used by `mechanistic/run_simulation.py`
-(exploratory single-run plots) and `benchmark/run_benchmark.py` (the
-`results/report.md` bundle):
+(exploratory single-run plots, see `notebooks/01_explore_mechanistic_baseline.ipynb`)
+and `benchmark/run_benchmark.py` (the `results/report.md` bundle):
 
-* `plot_thrombus_map`: mesh-triangulated view of the thrombosed region
-  (M_at/FI threshold mask, `benchmark/metrics.thrombus_mask`), styled after
-  the paper's Fig. 4-6 viscosity/thrombus maps.
-* `plot_shear_gradient_overlay`: wall shear rate and its axial gradient
-  along the vessel/aneurysm wall, highlighting negative-gradient regions
-  (paper Fig. 3c, 9a, 10d/h).
-* `plot_viscosity_field`: mesh-triangulated viscosity field (Eq. 18),
-  matching paper Fig. 4b/c/5a/11.
-* `plot_error_heatmap`: per-node error between neural and mechanistic
-  predictions, mesh-triangulated.
+* `plot_mesh_field`: mesh-triangulated view of a nodal scalar field (shared
+  by thrombus maps / viscosity fields / error heatmaps -- they differ only
+  in which field and colormap are passed).
 * `plot_speed_vs_accuracy`: scatter of runtime vs. accuracy metric across
   test-set samples, mechanistic vs. neural (the benchmark's headline plot).
-* `plot_ood_degradation`: bar/line comparison of in-distribution vs. OOD
-  metrics (`benchmark/ood_eval.py`).
+* `plot_ood_degradation`: bar comparison of in-distribution vs. OOD RMSE
+  (`benchmark/ood_eval.py`).
 * `plot_calibration`: reliability diagram (`benchmark/calibration.py`).
-
-Not yet implemented -- this is a scaffolding stub.
 """
 
 from __future__ import annotations
@@ -30,29 +21,101 @@ from __future__ import annotations
 import numpy as np
 
 
+def plot_mesh_field(node_coords: np.ndarray, elements: np.ndarray, field: np.ndarray, ax, title: str = "", cmap: str = "viridis"):
+    """Triangulated pseudocolor plot of a nodal scalar field. Shared
+    implementation for thrombus maps, viscosity fields, and error heatmaps
+    -- these differ only in which `field`/`cmap` is passed."""
+
+    n_vertices = node_coords.shape[1]
+    tpc = ax.tripcolor(node_coords[0], node_coords[1], elements.T, field[:n_vertices], shading="gouraud", cmap=cmap)
+    ax.set_aspect("equal")
+    ax.set_title(title)
+    return tpc
+
+
 def plot_thrombus_map(node_coords: np.ndarray, elements: np.ndarray, mask: np.ndarray, ax=None):
-    raise NotImplementedError("plots.plot_thrombus_map: not yet implemented")
+    import matplotlib.pyplot as plt
 
-
-def plot_shear_gradient_overlay(wall_coords: np.ndarray, shear_rate: np.ndarray, shear_gradient: np.ndarray, ax=None):
-    raise NotImplementedError("plots.plot_shear_gradient_overlay: not yet implemented")
+    if ax is None:
+        _, ax = plt.subplots()
+    return plot_mesh_field(node_coords, elements, mask.astype(float), ax, title="Thrombosed region", cmap="Reds")
 
 
 def plot_viscosity_field(node_coords: np.ndarray, elements: np.ndarray, viscosity: np.ndarray, ax=None):
-    raise NotImplementedError("plots.plot_viscosity_field: not yet implemented")
+    import matplotlib.pyplot as plt
+
+    if ax is None:
+        _, ax = plt.subplots()
+    return plot_mesh_field(node_coords, elements, viscosity, ax, title="Viscosity [Pa.s]", cmap="viridis")
 
 
 def plot_error_heatmap(node_coords: np.ndarray, elements: np.ndarray, error: np.ndarray, ax=None):
-    raise NotImplementedError("plots.plot_error_heatmap: not yet implemented")
+    import matplotlib.pyplot as plt
+
+    if ax is None:
+        _, ax = plt.subplots()
+    return plot_mesh_field(node_coords, elements, error, ax, title="Prediction error", cmap="magma")
+
+
+def plot_shear_gradient_overlay(wall_coords: np.ndarray, shear_rate: np.ndarray, shear_gradient: np.ndarray, ax=None):
+    import matplotlib.pyplot as plt
+
+    if ax is None:
+        _, ax = plt.subplots()
+    order = np.argsort(wall_coords)
+    ax2 = ax.twinx()
+    ax.plot(wall_coords[order], shear_rate[order], color="tab:blue", label="shear rate")
+    ax2.plot(wall_coords[order], shear_gradient[order], color="tab:red", label="d(shear)/dx")
+    ax2.axhline(0.0, color="gray", linewidth=0.5)
+    ax.set_xlabel("x [m]")
+    ax.set_ylabel("wall shear rate [1/s]", color="tab:blue")
+    ax2.set_ylabel("d(shear rate)/dx", color="tab:red")
+    return ax
 
 
 def plot_speed_vs_accuracy(runtimes: dict, accuracies: dict, ax=None):
-    raise NotImplementedError("plots.plot_speed_vs_accuracy: not yet implemented")
+    """runtimes/accuracies: {"mechanistic": array, "neural": array}."""
+
+    import matplotlib.pyplot as plt
+
+    if ax is None:
+        _, ax = plt.subplots()
+    for name, color in (("mechanistic", "tab:blue"), ("neural", "tab:orange")):
+        ax.scatter(runtimes[name], accuracies[name], label=name, color=color, alpha=0.7)
+    ax.set_xscale("log")
+    ax.set_xlabel("runtime [s]")
+    ax.set_ylabel("error (RMSE)")
+    ax.legend()
+    return ax
 
 
 def plot_ood_degradation(degradation: dict, ax=None):
-    raise NotImplementedError("plots.plot_ood_degradation: not yet implemented")
+    """degradation: output of `benchmark.ood_eval.evaluate_ood_degradation`."""
+
+    import matplotlib.pyplot as plt
+
+    if ax is None:
+        _, ax = plt.subplots()
+    labels = ["in-distribution (test)", "out-of-distribution (ood)"]
+    values = [degradation["test"]["overall"], degradation["ood"]["overall"]]
+    ax.bar(labels, values, color=["tab:blue", "tab:red"])
+    ax.set_ylabel("overall field RMSE")
+    ax.set_title(f"OOD degradation ratio: {degradation['degradation_ratio']:.2f}x")
+    return ax
 
 
 def plot_calibration(reliability_data: dict, ax=None):
-    raise NotImplementedError("plots.plot_calibration: not yet implemented")
+    """reliability_data: output of `benchmark.calibration.reliability_diagram_data`."""
+
+    import matplotlib.pyplot as plt
+
+    if ax is None:
+        _, ax = plt.subplots()
+    mv, mse = reliability_data["mean_variance"], reliability_data["mean_squared_error"]
+    max_val = max(mv.max(), mse.max()) if len(mv) else 1.0
+    ax.plot([0, max_val], [0, max_val], "k--", label="perfect calibration")
+    ax.scatter(mv, mse, color="tab:purple")
+    ax.set_xlabel("predicted variance")
+    ax.set_ylabel("observed squared error")
+    ax.legend()
+    return ax

@@ -40,7 +40,6 @@ pressure, Sec. 2.2).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
 
 import numpy as np
 from skfem import Basis, BilinearForm, ElementTriP1, ElementVector, ElementTriP2, bmat, condense, solve
@@ -156,13 +155,29 @@ def _wall_dofs(basis_u: Basis) -> np.ndarray:
     return np.unique(np.concatenate([basis_u.get_dofs(n).all() for n in names]))
 
 
+@dataclass
+class ThrombusViscosityFields:
+    """Nodal (P1) M_at/FI fields over the *flow* mesh, feeding the Eq. (18)
+    viscosity multiplier into a `solve_steady_flow` call. Nodal values away
+    from the wall (where `surface_ode.py`'s M_at/FI live) should be filled
+    with 0 -- the multiplier reduces to 1 (no thrombus) there automatically.
+    """
+
+    M_at_nodal: np.ndarray
+    FI_nodal: np.ndarray
+    M_at_critical_plt_cm2: float
+    fibrin_critical_uM: float
+    steepness_theta: float
+    multiplier_max: float = 80.0
+
+
 def solve_steady_flow(
     tagged_mesh: TaggedMesh,
     inlet_velocity_m_s: float,
     carreau: CarreauParams,
     picard_max_iter: int = 50,
     picard_tol: float = 1e-7,
-    viscosity_multiplier_field: Callable[[np.ndarray], np.ndarray] | None = None,
+    thrombus_fields: ThrombusViscosityFields | None = None,
 ) -> FlowSolution:
     """Solve steady, inertialess, Carreau-viscosity Stokes flow via Picard iteration.
 
@@ -175,11 +190,12 @@ def solve_steady_flow(
         Uniform (plug) inlet velocity in the +x direction, Sec. 2.2.
     carreau:
         Carreau viscosity parameters, Eq. (2).
-    viscosity_multiplier_field:
-        Optional callable mapping the previous-iterate velocity field's
-        quadrature-point shape to a multiplicative viscosity factor (Eq. 18,
-        `viscosity_multiplier`). Used by `coupled_solver.py` once a thrombus
-        is present; omitted (multiplier == 1) for flow-only validation runs.
+    thrombus_fields:
+        Optional `ThrombusViscosityFields` (nodal M_at/FI over this same
+        mesh) folding the Eq. (18) thrombus viscosity multiplier into the
+        Carreau closure. Used by `coupled_solver.py` once a thrombus is
+        present; omitted (multiplier == 1 everywhere) for flow-only
+        validation runs.
     """
 
     mesh = tagged_mesh.mesh
@@ -193,13 +209,24 @@ def solve_steady_flow(
     x0 = np.zeros(basis_u.N + basis_p.N)
     x0[ux_in] = inlet_velocity_m_s
 
+    if thrombus_fields is not None:
+        M_at_quad = basis_p.interpolate(thrombus_fields.M_at_nodal)
+        FI_quad = basis_p.interpolate(thrombus_fields.FI_nodal)
+        multiplier_quad = viscosity_multiplier(
+            M_at_quad, FI_quad,
+            thrombus_fields.M_at_critical_plt_cm2, thrombus_fields.fibrin_critical_uM,
+            thrombus_fields.steepness_theta, thrombus_fields.multiplier_max,
+        )
+    else:
+        multiplier_quad = None
+
     @BilinearForm
     def a_visc(u, v, w):
         sg_prev = sym_grad(w["u_prev"])
         gamma_dot = np.sqrt(np.maximum(2.0 * ddot(sg_prev, sg_prev), 0.0))
         mu = carreau.viscosity(gamma_dot)
-        if viscosity_multiplier_field is not None:
-            mu = mu * viscosity_multiplier_field(w["u_prev"])
+        if multiplier_quad is not None:
+            mu = mu * multiplier_quad
         return 2.0 * mu * ddot(sym_grad(u), sym_grad(v))
 
     @BilinearForm

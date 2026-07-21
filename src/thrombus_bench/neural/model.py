@@ -1,19 +1,17 @@
-"""Assembled neural surrogate: encoder + operator core + physics head + uncertainty head.
+"""Assembled neural surrogate: encoder + operator core.
 
 Responsibility
 ---------------
-Wire `encoder.py`, `operator_core.py`, `physics_losses.py`, and
-`uncertainty.py` into a single `nn.Module` that maps (geometry params,
-physiological params, inlet velocity, mesh geometry) -> predicted time
-series of (velocity, pressure, viscosity, 9 species concentrations, 4
-surface coverage fields), matching `configs/training.yaml`
-`model.output_channels`.
+Wire `encoder.py` and `operator_core.py` into a single `nn.Module` that
+maps the 8-scalar parameter vector (geometry + physiological parameters +
+inlet velocity, `data/generate_dataset.PARAM_ORDER`) to the predicted
+field grid (velocity x/y + 9 species concentrations, `data/dataset.FIELD_NAMES`,
+`configs/training.yaml` `model.output_channels`).
 
 This is the model `benchmark/run_benchmark.py` compares against the
-mechanistic solver (`mechanistic/coupled_solver.py`).
-
-Not yet implemented -- this is a scaffolding stub. Depends on
-`encoder.py` and `operator_core.py`.
+mechanistic solver (`mechanistic/coupled_solver.py`). Dropout (for
+`neural/uncertainty.py`'s MC-dropout path) is inserted between the encoder
+and operator core.
 """
 
 from __future__ import annotations
@@ -30,11 +28,12 @@ class ThrombusSurrogate(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.encoder = GeometryParamEncoder(**cfg["encoder"])
+        self.dropout = nn.Dropout2d(p=cfg.get("uncertainty", {}).get("mc_dropout_rate", 0.1))
         self.operator_core = build_operator_core(cfg["operator_core"], out_channels=cfg["output_channels"])
-        raise NotImplementedError("model.ThrombusSurrogate: not yet implemented (physics/uncertainty heads pending)")
 
-    def forward(self, params: torch.Tensor, geometry_sdf: torch.Tensor) -> dict[str, torch.Tensor]:
-        """Returns a dict of named output fields (velocity, pressure,
-        viscosity, per-species concentrations, per-surface-field coverage)."""
+    def forward(self, params: torch.Tensor) -> torch.Tensor:
+        """params: (batch, param_dim) -> (batch, output_channels, H, W)."""
 
-        raise NotImplementedError
+        latent = self.encoder(params)
+        latent = self.dropout(latent)
+        return self.operator_core(latent)

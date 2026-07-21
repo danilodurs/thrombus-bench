@@ -2,36 +2,48 @@
 
 Responsibility
 ---------------
-Wrap a `neural/model.py` `ThrombusSurrogate` to produce a predictive mean
-and variance per output field, selected via `configs/training.yaml`
+Wrap `neural/model.py` `ThrombusSurrogate` instances to produce a predictive
+mean and variance per output field, selected via `configs/training.yaml`
 `model.uncertainty.method`:
 
-* `"deep_ensemble"`: train `n_ensemble_members` independently-initialized
-  copies of the full model; predictive mean/variance from the ensemble.
+* `"deep_ensemble"`: `n_members` independently-initialized copies of the
+  full model; predictive mean/variance from the ensemble's per-member
+  predictions.
 * `"mc_dropout"`: keep dropout active at inference time and draw
-  `mc_dropout_n_samples` stochastic forward passes.
+  `n_samples` stochastic forward passes.
 
 Consumed by `benchmark/calibration.py` to check whether predicted variance
 tracks actual error (reliability diagrams).
-
-Not yet implemented -- this is a scaffolding stub.
 """
 
 from __future__ import annotations
+
+from typing import Callable
 
 import torch
 import torch.nn as nn
 
 
 class DeepEnsemble:
-    def __init__(self, model_factory, n_members: int):
+    def __init__(self, model_factory: Callable[[], nn.Module], n_members: int):
         self.models = [model_factory() for _ in range(n_members)]
-        raise NotImplementedError("uncertainty.DeepEnsemble: not yet implemented")
+
+    def to(self, device) -> "DeepEnsemble":
+        self.models = [m.to(device) for m in self.models]
+        return self
 
     def predict(self, *args, **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
-        """Returns (mean, variance) across ensemble members."""
+        """Returns (mean, variance) across ensemble members, each called
+        with identical `*args, **kwargs`."""
 
-        raise NotImplementedError
+        preds = torch.stack([m(*args, **kwargs) for m in self.models], dim=0)
+        return preds.mean(dim=0), preds.var(dim=0, unbiased=False)
+
+
+def _enable_mc_dropout(model: nn.Module) -> None:
+    for module in model.modules():
+        if isinstance(module, nn.Dropout):
+            module.train()
 
 
 class MCDropoutWrapper:
@@ -39,9 +51,13 @@ class MCDropoutWrapper:
         self.model = model
         self.n_samples = n_samples
         self.dropout_rate = dropout_rate
-        raise NotImplementedError("uncertainty.MCDropoutWrapper: not yet implemented")
 
     def predict(self, *args, **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
-        """Returns (mean, variance) across stochastic forward passes."""
+        """Returns (mean, variance) across `n_samples` stochastic forward
+        passes (dropout kept active; all other layers in eval mode)."""
 
-        raise NotImplementedError
+        self.model.eval()
+        _enable_mc_dropout(self.model)
+        with torch.no_grad():
+            preds = torch.stack([self.model(*args, **kwargs) for _ in range(self.n_samples)], dim=0)
+        return preds.mean(dim=0), preds.var(dim=0, unbiased=False)

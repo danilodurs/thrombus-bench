@@ -21,7 +21,7 @@ fluid:
 species:
   # Inlet (Dirichlet) concentrations, uniform initial concentrations equal
   # these values except thrombin (see README "Assumptions").
-  resting_platelets_inlet_plt_ml: 3.5e8       # [RP]_i, Table 1
+  resting_platelets_inlet_plt_ml: 3.5e+8       # [RP]_i, Table 1
   activated_platelets_inlet_fraction: 0.05     # [AP]_i = 0.05 * [RP]_i, Table 1
   prothrombin_inlet_uM: 1.1                    # [PT]_i, Table 1
   antithrombin_inlet_uM: 2.844                 # [AT]_i, Table 1
@@ -67,8 +67,8 @@ adhesion_aggregation:
   k_rs_cm_s: 0.0037               # resting-platelet adhesion to vessel wall
   k_as_cm_s: 0.045                # activated-platelet adhesion to vessel wall
   k_aa_cm_s: 0.045                # activated-platelet adhesion to deposited platelets
-  M_inf_plt_cm2: 7.0e6            # M_infinity, total surface capacity for platelets
-  M_at_critical_plt_cm2: 2.0e7    # thrombosis threshold on deposited activated platelets
+  M_inf_plt_cm2: 7.0e+6            # M_infinity, total surface capacity for platelets
+  M_at_critical_plt_cm2: 2.0e+7    # thrombosis threshold on deposited activated platelets
   theta_activation_fraction: 1.0  # theta, fraction of resting platelets activated on contact (Eq. C.1-C.20 simplified form assumes theta=1)
 
 fibrin:

@@ -5,43 +5,53 @@ seed: 0
 
 data:
   dataset_dir: data/processed
-  n_train: 700
-  n_val: 150
-  n_test: 150
+  # Reduced-scale demo defaults (see README.md "Project status" /
+  # "How to run"): a full-scale run per the original project scope would
+  # use O(100-1000) samples (n_train: 700, n_val: 150, n_test: 150 or
+  # similar) and O(10-100x) more training epochs below; these smaller
+  # defaults keep `thrombus-generate-dataset` + `thrombus-train` +
+  # `thrombus-benchmark` runnable end-to-end in a few minutes on CPU.
+  n_train: 24
+  n_val: 6
+  n_test: 6
   # Explicit out-of-distribution split: parameter combinations at the
   # extremes of the sampled ranges (see data/sampler.py), held out from
   # train/val entirely and evaluated separately in benchmark/ood_eval.py.
-  n_ood: 100
+  n_ood: 6
   ood_quantile: 0.9   # samples in the outer (1-quantile) tail of platelet /
                        # heparin / inlet-velocity ranges are routed to n_ood
 
 model:
-  # Geometry/parameter encoder -> latent grid (encoder.py)
+  # Geometry/parameter encoder -> latent grid (encoder.py). latent_grid_size
+  # must match the grid_size used by data/generate_dataset.py to rasterize
+  # the mechanistic solver's output (default 32x32; see its --grid-size flag).
   encoder:
-    param_dim: 8            # [aneurysm_d, vessel_d, v_in, platelet_conc, heparin_conc, PT, AT, FG]
-    latent_grid_size: [64, 64]
-    hidden_channels: 64
-    n_layers: 3
+    param_dim: 8            # data/generate_dataset.PARAM_ORDER: [aneurysm_d, vessel_d, v_in, platelet_conc, heparin_conc, PT, AT, FG]
+    latent_grid_size: [32, 32]
+    hidden_channels: 32
+    n_layers: 2
 
-  # Operator core (operator_core.py): choose "fno" (Fourier Neural Operator)
-  # or "gnn" (message-passing graph network on the FEM mesh).
+  # Operator core (operator_core.py): "fno" (Fourier Neural Operator) is
+  # implemented; "gnn" (message-passing graph network on the FEM mesh) is a
+  # documented-but-not-implemented extension point -- see operator_core.py.
   operator_core:
     type: fno
     fno:
-      modes: 16
-      hidden_channels: 64
-      n_layers: 4
+      modes: 8
+      hidden_channels: 32
+      n_layers: 3
     gnn:
-      hidden_channels: 64
+      hidden_channels: 32
       n_message_passing_steps: 6
 
-  # Output heads: velocity, viscosity, species concentrations, surface
-  # coverage fields (M, M_r, M_as, M_at), fibrin.
-  output_channels: 13
+  # Output channels, matching data/dataset.FIELD_NAMES: velocity_x,
+  # velocity_y, conc_RP, conc_AP, conc_APR, conc_APS, conc_T, conc_AT,
+  # conc_PT, conc_FG, conc_FI.
+  output_channels: 11
 
   uncertainty:
     method: deep_ensemble    # "deep_ensemble" or "mc_dropout"
-    n_ensemble_members: 5
+    n_ensemble_members: 3    # reduced from a typical 5-10 for demo-scale runtime
     mc_dropout_rate: 0.1
     mc_dropout_n_samples: 30
 
@@ -61,7 +71,7 @@ physics_loss:
     nonnegativity: 0.1
 
 optim:
-  epochs: 200
+  epochs: 40   # reduced from a typical 200+ for demo-scale runtime; see data: note above
   batch_size: 16
   lr: 3.0e-4
   weight_decay: 1.0e-5

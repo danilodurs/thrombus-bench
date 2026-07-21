@@ -18,19 +18,36 @@ distal neck, viscosity feedback) is.
 
 ## Project status
 
+The full pipeline (mesh → mechanistic solver → dataset generation → neural
+surrogate training → benchmark report) is implemented and runs end to end.
+Scope was deliberately kept small given this is a single-session research
+prototype -- see the size caveats below and "Known limitations".
+
 | Component | Status |
 |---|---|
-| `mechanistic/mesh.py` | **Implemented & tested.** Idealized 2D vessel+aneurysm geometry, self-contained Delaunay mesher. |
-| `mechanistic/flow_solver.py` | **Implemented & tested.** Steady Carreau-viscosity Stokes flow, Picard iteration, quasi-steady pulsatile wrapper. |
-| `mechanistic/species_transport.py`, `activation.py`, `surface_ode.py`, `coupled_solver.py` | Scaffolding stubs (docstrings + signatures only). |
-| `mechanistic/fibrin.py` | Implemented (closed-form Michaelis-Menten kinetics). |
-| `mechanistic/run_simulation.py` | Flow-only path implemented; full transient path pending `coupled_solver.py`. |
-| `data/`, `neural/`, `benchmark/`, `viz/` | Scaffolding stubs. |
+| `mechanistic/mesh.py`, `flow_solver.py` | **Implemented & tested.** Idealized 2D vessel+aneurysm geometry (self-contained Delaunay mesher), steady Carreau-viscosity Stokes flow (Picard iteration), quasi-steady pulsatile wrapper, Eq. (18) thrombus viscosity feedback. Mass conservation verified to machine precision. |
+| `mechanistic/activation.py`, `surface_ode.py`, `fibrin.py` | **Implemented & tested.** Chemical/mechanical activation (Appendix A/B), platelet adhesion/aggregation flux BCs + surface ODEs (Eqs. 6-7, C.1-C.20), Michaelis-Menten fibrin kinetics (Eqs. 16-17). |
+| `mechanistic/species_transport.py` | **Implemented & tested.** SUPG-stabilized implicit transport (huge Péclet numbers given Table 1's tiny diffusivities) + vectorized implicit reaction substepping (stiff kinetics, e.g. Eq. A.10's Γ reaching ~1e4 s⁻¹). |
+| `mechanistic/coupled_solver.py`, `run_simulation.py` | **Implemented & tested.** Full transient Stokes+CDR+surface-ODE coupling loop; CLI supports both flow-only and full-transient runs. See "Known limitations" re: thrombin/fibrin calibration. |
+| `data/sampler.py`, `generate_dataset.py`, `dataset.py` | **Implemented & tested.** LHS sampling + OOD-tail split, batch mechanistic runs with grid rasterization, PyTorch `Dataset`. |
+| `neural/encoder.py`, `operator_core.py`, `model.py`, `train.py` | **Implemented & tested.** FiLM-conditioned encoder + a real (if small) Fourier Neural Operator; `operator_core.type: gnn` is a documented, deliberately-unimplemented extension point. |
+| `neural/physics_losses.py` | **Partially implemented.** `mass_conservation` and `nonnegativity` penalties (finite-difference mode) are implemented; `cdr_residual`, `surface_flux_bc_residual`, and `autograd` residual mode are not (see module docstring). |
+| `neural/uncertainty.py` | **Implemented & tested.** MC-dropout and deep-ensemble wrappers. |
+| `benchmark/metrics.py`, `ood_eval.py`, `calibration.py`, `run_benchmark.py` | **Implemented & tested.** Field RMSE, OOD degradation, UQ calibration (reliability diagram + ECE), runtime comparison, Markdown+PNG report. `thrombus_height_error`/`time_to_onset_error`/`physics_residual_audit` are not implemented (need full spatiotemporal fields this project's dataset doesn't save -- see `metrics.py` docstring). |
+| `viz/plots.py` | **Implemented.** |
 
-Run `pytest` for the current state of test coverage: the mechanistic flow
-solver's trivial steady-state validation suite
-(`tests/test_mechanistic_conservation.py`) passes in full; other test files
-document intended coverage for not-yet-implemented modules via `xfail`.
+Run `pytest` — the full suite passes (mechanistic solver validation,
+surface ODE unit tests, species transport, coupled-solver integration
+tests, neural forward/gradient tests, benchmark metric tests).
+
+**Scale caveat:** `configs/training.yaml`'s defaults (24/6/6/6 train/val/
+test/ood samples, 32×32 grid, 40 epochs) are a *reduced-scale demo*, not
+the full O(100-1000)-sample dataset originally scoped — chosen so the
+entire pipeline (`thrombus-generate-dataset` → `thrombus-train` →
+`thrombus-benchmark`) runs in a few minutes on CPU in one session. Scale up
+`data.n_train`/`n_val`/`n_test`/`n_ood` and `optim.epochs` for a more
+statistically meaningful benchmark; nothing in the code depends on these
+particular values.
 
 ## Equations summary
 
@@ -154,17 +171,85 @@ relevant module's docstring:
    U l^-1`, while thrombin concentration elsewhere in the model (`[T]`, `T`
    inlet/initial conditions) is in `uM`. The paper's own `beta` conversion
    factor (Appendix D, U/mL <-> uM) suggests this is meant to be converted
-   before use rather than compared directly; this project treats
-   `[T]_crit` as requiring that conversion in `activation.py` (not yet
-   implemented) rather than assuming a typo.
+   before use rather than compared directly. In practice, `[T]_crit` is not
+   consumed by any implemented code path: the platelet-activation function
+   Omega (Eq. A.9) sums only over the agonists ADP/TxA2, not thrombin
+   itself, so no threshold comparison against `[T]_crit` was needed for the
+   equations this project implements. The parameter remains in
+   `configs/physio_params.yaml` (`activation.thrombin_critical`) as a
+   documented placeholder should a future extension need it.
 
 8. **Shear-enhanced species diffusivity.** Sec. 2.1 states red blood cells
    have a "shear-dependent augmenting effect" on platelet/large-protein
    diffusivity, added on top of the Table 1 Brownian coefficients, without
-   giving the closed-form expression. `species_transport.py` (not yet
-   implemented) documents a configurable `D_i(gamma_dot) = D_b,i * (1 +
-   k_rbc * gamma_dot)` closure, defaulting to `k_rbc = 0` (pure Brownian
-   diffusion) until a literature-sourced closure is selected.
+   giving the closed-form expression. This is not implemented -- `flow`
+   advects/diffuses species with plain Brownian diffusivity (Table 1);
+   fibrinogen/fibrin (not tabulated in Table 1 at all) fall back to the
+   platelet Brownian diffusivity as an order-of-magnitude placeholder
+   (`mechanistic/coupled_solver.py`, `diffusivity_m2_s` dict).
+
+9. **Eqs. (8)-(13) reconstruction.** The main-text block combining the
+   Appendix C chemical flux BCs with the Eqs. (6)-(7) mechanical flux BCs
+   renders as dense inline mathematics that could not be extracted with
+   full confidence for every subscript from the source PDF. `surface_ode.py`
+   reconstructs the combined M/M_as/M_at ODE system from the two
+   high-confidence blocks (Eqs. 6-7 and the θ=1-simplified Eqs. C.17-C.20)
+   following the pattern Eq. (15) states unambiguously; see that module's
+   "Reconstruction note" docstring for the exact equations used.
+
+10. **Numerical method for species transport & coupling.** Table 1's
+    diffusivities are tiny relative to advective/domain scales (Péclet
+    numbers ~1e6-1e8) and several reaction rate constants reach ~1e4 s⁻¹
+    (Eq. A.10's Γ) -- both far outside what a naive explicit or
+    unstabilized-Galerkin scheme can handle at a physically meaningful
+    macro time step. This project uses SUPG-stabilized implicit transport,
+    Strang-split local reaction substeps (vectorized implicit
+    backward-Euler + Newton, exploiting the reaction system's per-node
+    block-diagonal structure), and substepped surface-ODE updates. COMSOL's
+    internal solver details for the reference implementation are unknown;
+    these are this project's own numerical choices, documented in
+    `mechanistic/species_transport.py` and `coupled_solver.py`.
+
+11. **2D "unit-depth" convention for surface-density units.** The paper's
+    M/M_r/M_as/M_at (PLT/cm²) are genuinely areal (3D wall-surface)
+    quantities, while this project's mesh/FEM machinery is 2D and built in
+    SI (meters). `coupled_solver.py` reconciles this by treating rate
+    constants that multiply a *volumetric* bulk concentration (k_rs/k_as/
+    k_aa, cm/s) as needing only a length-unit conversion (cm/s → m/s),
+    while surface-density quantities that appear bare (not as a
+    dimensionless ratio like M/M_inf) need an explicit areal conversion
+    (PLT/cm² → PLT/m², ×1e4) -- see the `CM_TO_M`/`CM2_TO_M2` derivation
+    comment there. This was verified against an isolated wall-flux
+    mass-balance test but is a nontrivial, self-derived unit reconciliation
+    the paper's COMSOL implementation would not need to make explicit.
+
+## Known limitations
+
+- **Thrombin/fibrin generation is not well-calibrated.** The surface
+  thrombin-generation flux (Eqs. C.5-C.6, via `phi_at`/`phi_rt` on M_at/M_r)
+  combined with Eq. (A.10)'s Γ -- which *saturates* rather than
+  accelerates as `[T]` grows, since T appears in Γ's denominator --
+  produces runaway growth in `[T]` (and downstream `[FI]`) over timescales
+  of seconds in the current coupling scheme, well beyond physiological
+  ranges (~0.1-10 µM). This was not resolved despite the unit
+  reconciliation above (independently verified correct via an isolated
+  mass-balance check). A generous concentration cap
+  (`coupled_solver.py`'s `concentration_cap`) keeps simulations numerically
+  bounded rather than diverging, but `[T]`/`[FI]` values from
+  `run_coupled_simulation`/`generate_dataset.py` should not be treated as
+  physically meaningful without further recalibration against a reference
+  implementation this project does not have access to.
+- **No quantitative validation against the paper's reported results.**
+  Fig. 4's ~120-minute thrombus height comparison is far outside what this
+  project's demo-scale runs simulate (seconds, per the scale caveat above);
+  qualitative behaviors this project *does* reproduce (mass-conserving
+  flow, shear-thinning viscosity, saturating platelet surface coverage,
+  negative-shear-gradient-gated mechanical flux) are checked in `tests/`,
+  but there is no COMSOL reference run to compare full thrombus dynamics
+  against.
+- **Neural surrogate is a small demo model on a small dataset**, not a
+  tuned architecture -- see the "Scale caveat" above. Its benchmark numbers
+  demonstrate the *pipeline*, not a validated speed/accuracy trade-off.
 
 ## Repository layout
 
@@ -173,7 +258,7 @@ configs/                  Hydra/OmegaConf YAML configs (geometry, physio params,
 src/thrombus_bench/
   mechanistic/             2D FEM thrombus formation solver (scikit-fem)
   data/                    Dataset generation (LHS sampling + batch mechanistic runs) for the surrogate
-  neural/                  Neural surrogate (encoder + FNO/GNN core + physics-informed losses + UQ)
+  neural/                  Neural surrogate (encoder + FNO core [GNN unimplemented] + physics-informed losses + UQ)
   benchmark/               Accuracy/runtime/OOD/calibration metrics + report generation
   viz/                     Plotting utilities
 tests/                     pytest suite
@@ -195,28 +280,44 @@ pip install -e .
 pip install torch --index-url https://download.pytorch.org/whl/cpu
 ```
 
-### Run the mechanistic flow solver (currently implemented path)
+### Run a single mechanistic simulation
 
 ```bash
+# Flow field only (fast, seconds):
+python -m thrombus_bench.mechanistic.run_simulation --flow-only \
+    --geometry-preset aneurysm_7mm --output flow_solution.npz
+
+# Full transient coupled simulation (flow + species + surface ODEs):
 python -m thrombus_bench.mechanistic.run_simulation \
-    --vessel-diameter-mm 3.2 --aneurysm-diameter-mm 7.0 \
-    --inlet-velocity-cm-s 47 --output flow_solution.npz
+    --geometry-preset aneurysm_7mm --end-time-s 2.0 --dt-s 0.1 \
+    --output simulation.npz
 ```
 
 Or explore interactively: `jupyter notebook notebooks/01_explore_mechanistic_baseline.ipynb`.
+
+### Run the full benchmark pipeline (dataset → training → report)
+
+```bash
+# 1. Generate the (demo-scale, see "Scale caveat" above) dataset:
+thrombus-generate-dataset --output-dir data/processed
+
+# 2. Train the neural surrogate:
+thrombus-train --dataset-dir data/processed --checkpoint checkpoints/model.pt
+
+# 3. Run the benchmark, producing results/report.md + PNGs:
+thrombus-benchmark --checkpoint checkpoints/model.pt --dataset-dir data/processed
+```
+
+Each step also accepts `--training-config`/`--physio-config`/
+`--geometry-config` overrides (default to the `configs/*.yaml` files in this
+repo) and other flags -- see `--help` on each command, or the corresponding
+module's `main()` in `src/thrombus_bench/{data,neural,benchmark}/`.
 
 ### Run tests
 
 ```bash
 pytest
 ```
-
-### Not yet runnable (pending implementation)
-
-`thrombus-generate-dataset`, `thrombus-train`, `thrombus-benchmark` are
-wired up as CLI entrypoints (`pyproject.toml` `[project.scripts]`) but their
-underlying modules (`coupled_solver.py`, `dataset.py`, `model.py`, etc.) are
-scaffolding stubs — see "Project status" above.
 
 ## Configuration
 
