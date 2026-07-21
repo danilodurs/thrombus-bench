@@ -109,47 +109,47 @@ terms alongside the usual data loss (`neural/model.py` wires
 `encoder.py` + `operator_core.py`; `train.py` combines the losses):
 
 ```
-              8-scalar parameter vector θ
-        (geometry preset, physio params, inlet v)
-                          │
-                          ▼
-        ┌───────────────────────────────┐
-        │ encoder.py                    │
-        │ GeometryParamEncoder           │
-        │ FiLM-style MLP modulation of   │
-        │ a learned base grid + fixed    │
-        │ sinusoidal coordinate embedding│
-        └───────────────┬───────────────┘
-                        │ latent spatial grid
-                        ▼
-        ┌───────────────────────────────┐
-        │ Dropout2d                     │
-        │ (MC-dropout UQ tap point)      │
-        └───────────────┬───────────────┘
-                        │
-                        ▼
-        ┌───────────────────────────────┐
-        │ operator_core.py              │
-        │ Fourier Neural Operator        │
-        │ (truncated spectral conv +     │
-        │  pointwise residual, per layer)│
-        │ [gnn backbone: unimplemented]  │
-        └───────────────┬───────────────┘
-                        │ predicted field grid
-                        │ (velocity x/y + 9 species)
-                        ▼
-        ┌───────────────────────────────┐
-        │ train.py loss                 │
-        │ MSE data loss (vs. (A)'s       │
-        │ rasterized fields)  +          │
-        │ physics_losses.py:             │
+            8-scalar parameter vector θ
+     (geometry preset, physio params, inlet v)
+                         │
+                         ▼
+        ┌─────────────────────────────────┐
+        │ encoder.py                      │
+        │ GeometryParamEncoder            │
+        │ FiLM-style MLP modulation of    │
+        │ a learned base grid + fixed     │
+        │ sinusoidal coordinate embedding │
+        └─────────────────────────────────┘
+                         │ latent spatial grid
+                         ▼
+        ┌─────────────────────────────────┐
+        │ Dropout2d                       │
+        │ (MC-dropout UQ tap point)       │
+        └─────────────────────────────────┘
+                         │
+                         ▼
+        ┌─────────────────────────────────┐
+        │ operator_core.py                │
+        │ Fourier Neural Operator         │
+        │ (truncated spectral conv +      │
+        │ pointwise residual, per layer)  │
+        │ [gnn backbone: unimplemented]   │
+        └─────────────────────────────────┘
+                         │ predicted field grid
+                         │ (velocity x/y + 9 species)
+                         ▼
+        ┌─────────────────────────────────┐
+        │ train.py loss                   │
+        │ MSE data loss (vs. (A)'s        │
+        │ rasterized fields) +            │
+        │ physics_losses.py:              │
         │ mass-conservation +             │
-        │ non-negativity penalties       │
-        └───────────────┬───────────────┘
-                        │
-                        ▼
-        uncertainty.py: MC-dropout / deep-ensemble
-        wrapper repeats the forward pass for UQ
+        │ non-negativity penalties        │
+        └─────────────────────────────────┘
+                         │
+                         ▼
+                         uncertainty.py: MC-dropout / deep-ensemble
+                         wrapper repeats the forward pass for UQ
 ```
 
 ### Benchmark pipeline — dataset → train → report
