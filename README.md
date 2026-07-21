@@ -49,6 +49,130 @@ entire pipeline (`thrombus-generate-dataset` → `thrombus-train` →
 statistically meaningful benchmark; nothing in the code depends on these
 particular values.
 
+## Architecture
+
+### (A) Mechanistic model — coupled solve loop
+
+Per macro time step `dt`, `mechanistic/coupled_solver.py` cycles flow,
+surface, and species physics on a mesh built once by `mesh.py`:
+
+```
+mesh.py (Delaunay vessel+aneurysm) ──▶ built once, reused every step
+                                              │
+                     ┌────────────────────────┘
+                     ▼
+        ┌──────────────────────────┐
+        │ (1) flow_solver.py       │
+        │ Stokes + Carreau         │
+        │ viscosity (Picard)       │
+        └─────────────┬────────────┘
+                       │ wall shear rate γ_w
+                       ▼
+        ┌──────────────────────────┐
+        │ (2) wall shear gradient  │
+        │ d(γ_w)/dx, split into    │
+        │ top / bottom branches    │
+        └─────────────┬────────────┘
+                       │ negative-gradient-gated mechanical flux
+                       ▼
+        ┌──────────────────────────┐
+        │ (3) surface_ode.py       │
+        │ coverage ODEs            │
+        │ M, M_r, M_as, M_at       │
+        └─────────────┬────────────┘
+                       │ updated wall-flux BCs
+                       ▼
+        ┌──────────────────────────┐
+        │ (4) species_transport.py │
+        │ + activation.py/fibrin.py│
+        │ SUPG transport, Strang-  │
+        │ split Newton reaction    │
+        └─────────────┬────────────┘
+                       │ new M_at, [FI] fields
+                       ▼
+        ┌──────────────────────────┐
+        │ (5) flow_solver.py       │
+        │ viscosity_multiplier     │
+        │ (Eq. 18 thrombus fdbk)   │
+        └─────────────┬────────────┘
+                       │
+                       └───────────▶ back to (1), next macro step
+                                     (repeat until end_time_s)
+```
+
+### (B) Hybrid benchmark — mechanistic model vs. neural surrogate
+
+The benchmark treats the mechanistic solve as ground truth and the neural
+model as a learned, fast approximation of it, both driven by the same
+sampled parameter vector:
+
+```
+                        sampled parameter vector θ
+                  (geometry preset, physio params, inlet v)
+                                    │
+                 ┌──────────────────┴──────────────────┐
+                 ▼                                     ▼
+     ┌─────────────────────────┐           ┌─────────────────────────┐
+     │ (A) Mechanistic model    │           │ (B) Neural surrogate     │
+     │ mesh → coupled Stokes +  │           │ FiLM-conditioned encoder │
+     │ CDR + surface-ODE solve  │           │ + Fourier Neural         │
+     │ (mechanistic/*.py)       │           │ Operator core            │
+     │                          │           │ (neural/*.py)            │
+     │ slow, high-fidelity      │           │ fast, learned            │
+     │ ground truth             │           │ approximation            │
+     └────────────┬─────────────┘           └────────────┬─────────────┘
+                  │ rasterized fields                     │ predicted fields
+                  │ (velocity, pressure,                  │ (same grid,
+                  │  species, M_at, FI)                   │  + MC-dropout /
+                  │                                       │  ensemble UQ)
+                  └───────────────────┬───────────────────┘
+                                      ▼
+                         benchmark/*.py comparison:
+                         field RMSE, OOD degradation,
+                         UQ calibration, runtime speedup
+                                      │
+                                      ▼
+                          results/report.md + PNGs
+```
+
+### Benchmark pipeline — dataset → train → report
+
+The three CLI entry points (`thrombus-generate-dataset` →
+`thrombus-train` → `thrombus-benchmark`) wire (A) and (B) above into an
+end-to-end pipeline:
+
+```
+data/sampler.py                data/generate_dataset.py
+(LHS sampling +      ──▶       batch-runs (A) mechanistic model per
+ OOD-tail split)                sample, rasterizes fields to a fixed
+                                 grid, writes data/processed/{split}/
+                                 sample_NNN.npz
+                                       │
+                                       ▼
+                        thrombus-generate-dataset  (CLI)
+                                       │
+                                       ▼
+                        data/dataset.py
+                        ThrombusSurrogateDataset
+                                       │
+                                       ▼
+                        thrombus-train  (CLI)
+                        neural/train.py: optimizes (B) ThrombusSurrogate
+                        against MSE + physics losses (neural/physics_losses.py)
+                                       │
+                                       ▼
+                        checkpoints/model.pt
+                                       │
+                                       ▼
+                        thrombus-benchmark  (CLI)
+                        benchmark/run_benchmark.py: evaluate on test+ood,
+                        compute metrics/ood_eval/calibration, time a fresh
+                        mechanistic re-solve, render viz/plots.py
+                                       │
+                                       ▼
+                        results/report.md + PNGs
+```
+
 ## Equations summary
 
 The mechanistic model (Sec. 2 of the paper) is a coupled Navier-Stokes /
@@ -330,3 +454,12 @@ pytest
   Deviations" above).
 - `configs/training.yaml`: neural surrogate architecture, physics-loss
   weights, optimizer, and dataset split sizes (including the OOD split).
+
+## Contributors
+
+- **Danilo Dursoniah** ([ddursoniah@gmail.com](mailto:ddursoniah@gmail.com))
+  — Data Scientist and Computational Biologist. Implementation,
+  calibration, and maintenance of the mechanistic solver, neural
+  surrogate, and benchmark pipeline.
+
+_Last updated: 2026-07-21_
