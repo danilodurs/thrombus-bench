@@ -100,39 +100,56 @@ mesh.py (Delaunay vessel+aneurysm) ──▶ built once, reused every step
                                      (repeat until end_time_s)
 ```
 
-### (B) Hybrid benchmark — mechanistic model vs. neural surrogate
+### (B) Neural surrogate — hybrid (biophysics-aware) architecture
 
-The benchmark treats the mechanistic solve as ground truth and the neural
-model as a learned, fast approximation of it, both driven by the same
-sampled parameter vector:
+"Hybrid" here means the model itself, not the comparison: a data-driven
+Fourier Neural Operator conditioned on the same geometry/physiological
+parameters as the mechanistic model, trained with physics-informed loss
+terms alongside the usual data loss (`neural/model.py` wires
+`encoder.py` + `operator_core.py`; `train.py` combines the losses):
 
 ```
-                        sampled parameter vector θ
-                  (geometry preset, physio params, inlet v)
-                                    │
-                 ┌──────────────────┴──────────────────┐
-                 ▼                                     ▼
-     ┌─────────────────────────┐           ┌─────────────────────────┐
-     │ (A) Mechanistic model    │           │ (B) Neural surrogate     │
-     │ mesh → coupled Stokes +  │           │ FiLM-conditioned encoder │
-     │ CDR + surface-ODE solve  │           │ + Fourier Neural         │
-     │ (mechanistic/*.py)       │           │ Operator core            │
-     │                          │           │ (neural/*.py)            │
-     │ slow, high-fidelity      │           │ fast, learned            │
-     │ ground truth             │           │ approximation            │
-     └────────────┬─────────────┘           └────────────┬─────────────┘
-                  │ rasterized fields                     │ predicted fields
-                  │ (velocity, pressure,                  │ (same grid,
-                  │  species, M_at, FI)                   │  + MC-dropout /
-                  │                                       │  ensemble UQ)
-                  └───────────────────┬───────────────────┘
-                                      ▼
-                         benchmark/*.py comparison:
-                         field RMSE, OOD degradation,
-                         UQ calibration, runtime speedup
-                                      │
-                                      ▼
-                          results/report.md + PNGs
+              8-scalar parameter vector θ
+        (geometry preset, physio params, inlet v)
+                          │
+                          ▼
+        ┌───────────────────────────────┐
+        │ encoder.py                    │
+        │ GeometryParamEncoder           │
+        │ FiLM-style MLP modulation of   │
+        │ a learned base grid + fixed    │
+        │ sinusoidal coordinate embedding│
+        └───────────────┬───────────────┘
+                        │ latent spatial grid
+                        ▼
+        ┌───────────────────────────────┐
+        │ Dropout2d                     │
+        │ (MC-dropout UQ tap point)      │
+        └───────────────┬───────────────┘
+                        │
+                        ▼
+        ┌───────────────────────────────┐
+        │ operator_core.py              │
+        │ Fourier Neural Operator        │
+        │ (truncated spectral conv +     │
+        │  pointwise residual, per layer)│
+        │ [gnn backbone: unimplemented]  │
+        └───────────────┬───────────────┘
+                        │ predicted field grid
+                        │ (velocity x/y + 9 species)
+                        ▼
+        ┌───────────────────────────────┐
+        │ train.py loss                 │
+        │ MSE data loss (vs. (A)'s       │
+        │ rasterized fields)  +          │
+        │ physics_losses.py:             │
+        │ mass-conservation +             │
+        │ non-negativity penalties       │
+        └───────────────┬───────────────┘
+                        │
+                        ▼
+        uncertainty.py: MC-dropout / deep-ensemble
+        wrapper repeats the forward pass for UQ
 ```
 
 ### Benchmark pipeline — dataset → train → report
