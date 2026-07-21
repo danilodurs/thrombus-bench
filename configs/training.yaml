@@ -1,0 +1,77 @@
+# Hyperparameters for the neural surrogate (src/thrombus_bench/neural/*) and
+# for the dataset generation / split used to train and evaluate it.
+
+seed: 0
+
+data:
+  dataset_dir: data/processed
+  n_train: 700
+  n_val: 150
+  n_test: 150
+  # Explicit out-of-distribution split: parameter combinations at the
+  # extremes of the sampled ranges (see data/sampler.py), held out from
+  # train/val entirely and evaluated separately in benchmark/ood_eval.py.
+  n_ood: 100
+  ood_quantile: 0.9   # samples in the outer (1-quantile) tail of platelet /
+                       # heparin / inlet-velocity ranges are routed to n_ood
+
+model:
+  # Geometry/parameter encoder -> latent grid (encoder.py)
+  encoder:
+    param_dim: 8            # [aneurysm_d, vessel_d, v_in, platelet_conc, heparin_conc, PT, AT, FG]
+    latent_grid_size: [64, 64]
+    hidden_channels: 64
+    n_layers: 3
+
+  # Operator core (operator_core.py): choose "fno" (Fourier Neural Operator)
+  # or "gnn" (message-passing graph network on the FEM mesh).
+  operator_core:
+    type: fno
+    fno:
+      modes: 16
+      hidden_channels: 64
+      n_layers: 4
+    gnn:
+      hidden_channels: 64
+      n_message_passing_steps: 6
+
+  # Output heads: velocity, viscosity, species concentrations, surface
+  # coverage fields (M, M_r, M_as, M_at), fibrin.
+  output_channels: 13
+
+  uncertainty:
+    method: deep_ensemble    # "deep_ensemble" or "mc_dropout"
+    n_ensemble_members: 5
+    mc_dropout_rate: 0.1
+    mc_dropout_n_samples: 30
+
+physics_loss:
+  enabled: true
+  # Whether PDE residuals are computed via autograd on a continuous
+  # (coordinate -> field) reparameterization of the network output, or via
+  # finite differences on the regular latent grid. See
+  # neural/physics_losses.py docstring.
+  residual_mode: finite_difference   # "autograd" or "finite_difference"
+  weights:
+    data: 1.0
+    navier_stokes_residual: 0.1
+    cdr_residual: 0.1
+    surface_flux_bc_residual: 0.05   # mirrors Eqs. (6)-(13)
+    mass_conservation: 0.05
+    nonnegativity: 0.1
+
+optim:
+  epochs: 200
+  batch_size: 16
+  lr: 3.0e-4
+  weight_decay: 1.0e-5
+  optimizer: adamw
+  lr_schedule: cosine
+  grad_clip_norm: 1.0
+  early_stopping_patience: 20
+
+logging:
+  backend: csv       # "csv" or "tensorboard"
+  log_dir: runs/
+  checkpoint_dir: checkpoints/
+  log_every_n_steps: 10

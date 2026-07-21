@@ -1,0 +1,128 @@
+# Physiological and kinetic parameters for the mechanistic thrombus model.
+# Primary source: Table 1 of Cardillo, Pouponneau & Barakat (2026),
+# Comput. Biol. Med. 213:111829. Chemical-activation/aggregation constants
+# (section `sorensen_chemical`) are from their Appendix D, Table D.2,
+# "adopted from Sorensen et al. [13]".
+#
+# Units are kept as in the paper (cm, s, uM, PLT/ml, Pa.s) at the parameter
+# level; mechanistic/* modules are responsible for any internal unit
+# conversion to SI needed for the FEM assembly.
+
+fluid:
+  density_kg_m3: 1110.0          # rho, Table 1
+  # Carreau non-Newtonian viscosity model, Eq. (2):
+  #   mu(gamma_dot) = mu_inf + (mu0 - mu_inf) * [1 + (lambda*gamma_dot)^2]^((n-1)/2)
+  carreau:
+    mu_inf_pa_s: 0.0035           # mu, high-shear viscosity, Table 1
+    mu_0_pa_s: 0.056               # zero-shear viscosity, Sec. 2.2
+    lambda_s: 3.313                # time constant, Sec. 2.2
+    n: 0.3568                      # power-law index, Sec. 2.2
+
+species:
+  # Inlet (Dirichlet) concentrations, uniform initial concentrations equal
+  # these values except thrombin (see README "Assumptions").
+  resting_platelets_inlet_plt_ml: 3.5e8       # [RP]_i, Table 1
+  activated_platelets_inlet_fraction: 0.05     # [AP]_i = 0.05 * [RP]_i, Table 1
+  prothrombin_inlet_uM: 1.1                    # [PT]_i, Table 1
+  antithrombin_inlet_uM: 2.844                 # [AT]_i, Table 1
+  fibrinogen_inlet_uM: 7.0                     # [FG]_i, Table 1
+  fibrin_inlet_uM: 0.0                         # [FI]_i, Table 1
+  thrombin_initial_uM: 0.0                     # [T]_i, Table 1 (also inlet BC)
+
+  # Brownian diffusion coefficients (cm^2/s), Table 1. A shear-enhanced
+  # diffusivity term is added on top of these per Sec. 2.1 ("Because red
+  # blood cells have a shear-dependent augmenting effect...") -- the exact
+  # closure is left as a configurable model in
+  # mechanistic/species_transport.py (see its docstring).
+  diffusion_cm2_s:
+    platelets: 1.58e-9            # D_b,plt
+    ADP: 2.57e-6                  # D_b,ADP
+    TxA2: 2.16e-6                 # D_b,TxA2
+    thrombin: 4.16e-7             # D_b,T
+    prothrombin: 3.32e-7          # D_b,PT
+    antithrombin: 3.32e-7         # D_b,AT
+
+activation:
+  # Chemical activation thresholds and mechanical activation shear threshold.
+  thrombin_critical: 0.1          # [T]_crit, Table 1. NOTE unit as printed in
+                                   # paper is "U l^-1", inconsistent with the
+                                   # uM used elsewhere for T -- see README
+                                   # "Assumptions & Deviations" for how this
+                                   # is resolved (converted via beta, Eq. A.10).
+  txa2_critical_uM: 0.6           # [TxA2]_crit, Table 1
+  adp_critical_uM: 2.0            # [ADP]_crit, Table 1
+  shear_rate_critical_s: 10000.0  # gamma_crit, mechanical activation, Table 1 / Eq. (B.1)
+
+  # Smooth-step steepness. The paper defines Omega-based activation (Eq. A.8)
+  # and Theta_plts/Theta_FI (Sec. 2.6) as hard step functions; we approximate
+  # each with a logistic sigmoid of configurable steepness `k` so that
+  # step(x) ~= 1 / (1 + exp(-k*(x - x0))). This is an explicit modeling
+  # choice not specified by the source paper -- see README.
+  smoothing:
+    steepness_omega: 50.0         # for step(Omega) in Eq. (A.8)-(A.9)
+    steepness_theta: 20.0         # for Theta_plts / Theta_FI in Eq. (18)
+
+adhesion_aggregation:
+  # First-order surface reaction / adhesion rate constants, Table 1.
+  k_rs_cm_s: 0.0037               # resting-platelet adhesion to vessel wall
+  k_as_cm_s: 0.045                # activated-platelet adhesion to vessel wall
+  k_aa_cm_s: 0.045                # activated-platelet adhesion to deposited platelets
+  M_inf_plt_cm2: 7.0e6            # M_infinity, total surface capacity for platelets
+  M_at_critical_plt_cm2: 2.0e7    # thrombosis threshold on deposited activated platelets
+  theta_activation_fraction: 1.0  # theta, fraction of resting platelets activated on contact (Eq. C.1-C.20 simplified form assumes theta=1)
+
+fibrin:
+  # Michaelis-Menten thrombin-mediated fibrin generation, Eq. (16)-(17).
+  k_fi_th_per_s: 59.0             # k^th_fi
+  k_mfi_th_uM: 3.16               # k^th_m,fi
+  fibrin_critical_uM: 0.6         # [FI]_crit, Table 1, thrombosis threshold on fibrin
+
+thrombus_growth:
+  # Viscosity feedback, Eq. (18). Non-thrombosed vs thrombosed blood have
+  # the same Carreau functional form but a viscosity multiplier of up to 80x
+  # (per fully-satisfied threshold) or 160x (both platelet and fibrin
+  # thresholds satisfied) is applied via the smooth Theta functions above.
+  viscosity_multiplier_single_threshold: 80.0
+  viscosity_multiplier_both_thresholds: 160.0
+
+scale_terms:
+  # L: characteristic length scale in the adhesion/aggregation flux BCs
+  # (Eqs. 6-7), defined as 10x the vessel entrance diameter.
+  L_entrance_diameter_multiplier: 10.0
+  # D_a: thrombus growth-rate scale term in Eqs. (14)-(15). The paper states
+  # "different values of D_a were tested" and reports only that the chosen
+  # value "ensures smooth convergence and best reproduces the experimental
+  # data" without giving the numeric value in Table 1 as extracted here.
+  # Treated as a calibration constant; default is unity and should be tuned
+  # against Fig. 4/7/8/9 data if closer quantitative agreement is desired.
+  # See README "Assumptions & Deviations".
+  D_a: 1.0
+  cardiac_angular_frequency_rad_s: 6.28  # omega, Table 1 (used for pulsatile inlet)
+
+heparin:
+  # Heparin concentration [H] is assumed constant over the simulated window
+  # (Sec. "Modeling platelet activation" / Appendix A.1) and modulates
+  # thrombin inhibition via Gamma, Eq. (A.10).
+  concentration_uM: 2.0            # [H], Table D.2 default; sweepable per Fig. 8 (0.1-0.5 uM)
+
+sorensen_chemical:
+  # Chemical platelet activation & aggregation constants, Appendix D
+  # (Table D.2), adopted from Sorensen et al. Used by activation.py and
+  # surface_ode.py (Appendix A & C equations).
+  lambda_ADP_nmol_plt: 2.0e-8       # lambda_ADP, agonist released per platelet, Eq. (A.3)
+  k1_TxA2_per_s: 0.0161             # k_{1,TxA2}, inhibition rate constant, Eq. (A.4)
+  # k_{1,ADP} is not separately tabulated in the paper's Appendix D excerpt;
+  # as an explicit documented assumption we reuse k1_TxA2_per_s for ADP's
+  # Eq. (A.3) inhibition term. See README "Assumptions & Deviations".
+  k1_ADP_per_s: 0.0161
+  s_p_TxA2_nmol_plt_s: 9.5e-12      # s_{p,TxA2}, synthesis rate, Eq. (A.4)
+  k1_T_per_s: 13.33                 # k_{1,T}, thrombin-antithrombin rate constant, Eq. (A.10)
+  K_AT_uM: 0.10                     # K_AT, dissociation constant, Eq. (A.10)
+  K_T_uM: 3.5e-2                    # K_T, dissociation constant, Eq. (A.10)
+  alpha: 1.0                        # alpha, heparin-affinity switch factor, Eq. (A.10)
+  theta: 1.0                        # theta, fraction of resting platelets activated on contact
+  beta_nmol_per_U: 9.11e-3          # beta, U/mL -> uM conversion factor for thrombin
+  phi_at_U_plt_s_uMPT: 3.69e-9      # phi_at, thrombin generation rate on activated platelets, Eq. (A.5)-(A.6)
+  phi_rt_U_plt_s_uMPT: 6.50e-10     # phi_rt, thrombin generation rate on resting platelets, Eq. (A.5)-(A.6)
+  t_act_s: 1.0                      # characteristic activation time constant, Eq. (A.9)
+  agonist_weight_wj: 1.0            # w_j, per-agonist weight in Omega, Eq. (A.9), assumed equal for all agonists

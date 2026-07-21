@@ -1,0 +1,55 @@
+# Idealized 2D aneurysm geometries, following Fig. 1 of Cardillo, Pouponneau &
+# Barakat (2026). Both geometries are longitudinal mid-plane sections of a
+# spherical aneurysmal sac emanating from a straight parent vessel segment of
+# total length 50 mm, with the aneurysm centered along that length.
+#
+# All lengths in millimeters unless noted otherwise. `inlet_velocity_cm_s` is
+# the mean/steady inlet velocity used in the paper's steady-flow cases; the
+# pulsatile waveform (physiological/pathological amplitude, f = 1 Hz, see
+# Section 3.3.4 / Fig. 10-11) is layered on top of this mean by
+# mechanistic/flow_solver.py when `pulsatile.enabled=true`.
+
+default_preset: aneurysm_7mm
+
+presets:
+  aneurysm_7mm:
+    description: >
+      7 mm-diameter aneurysm emanating from a 3.2 mm-diameter vessel
+      (Fig. 1, left column). Experimental flow rate 230 mL/min.
+    vessel_diameter_mm: 3.2
+    aneurysm_diameter_mm: 7.0
+    vessel_length_mm: 50.0
+    inlet_velocity_cm_s: 47.0
+    inlet_flow_rate_ml_min: 230.0
+    reynolds_number_reference: 455  # as reported in paper, Sec. 3.1
+
+  aneurysm_10mm:
+    description: >
+      10 mm-diameter aneurysm emanating from a 4 mm-diameter vessel
+      (Fig. 1, right column). Experimental flow rate 360 mL/min.
+    vessel_diameter_mm: 4.0
+    aneurysm_diameter_mm: 10.0
+    vessel_length_mm: 50.0
+    inlet_velocity_cm_s: 75.0
+    inlet_flow_rate_ml_min: 360.0
+    reynolds_number_reference: 908  # as reported in paper, Sec. 3.1
+
+# Pulsatile inlet waveform (Section 3.3.4 / Fig. 10): a non-reversing
+# sinusoid v(t) = v_mean + A * cos(2*pi*f*t), f = 1 Hz (60 bpm).
+# amplitude_cm_s: physiological = 37, pathological = 75 (about v_mean=75cm/s).
+pulsatile:
+  enabled: false
+  frequency_hz: 1.0
+  amplitude_cm_s: 37.0
+  waveform: cosine
+
+# Mesh generation (mechanistic/mesh.py). The paper uses ~10,000 triangular
+# elements in COMSOL; this is intentionally coarser by default so that
+# generate_dataset.py can produce O(100-1000) simulations on CPU in
+# reasonable time. Override via Hydra CLI (mesh.target_num_elements=...) for
+# higher-fidelity single runs.
+mesh:
+  target_num_elements: 2000
+  neck_refinement_factor: 3.0   # local element-size divisor near proximal/distal neck
+  neck_band_fraction: 0.15      # fraction of aneurysm arc length treated as "neck" for refinement
+  element_type: triangle

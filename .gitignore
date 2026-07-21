@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Data & model artifacts
+data/*.h5
+data/*.npz
+data/raw/
+data/processed/
+checkpoints/
+*.ckpt
+*.pt
+*.pth
+
+# Results & logs
+results/*.png
+results/*.md
+!results/.gitkeep
+runs/
+lightning_logs/
+.tensorboard/
+*.log
+
+# Hydra
+outputs/
+multirun/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
