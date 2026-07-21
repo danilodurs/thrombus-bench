@@ -395,7 +395,7 @@ relevant module's docstring:
 ## Repository layout
 
 ```
-configs/                  Hydra/OmegaConf YAML configs (geometry, physio params, training)
+configs/                  Plain YAML configs, loaded via PyYAML (geometry, physio params, training)
 src/thrombus_bench/
   mechanistic/             2D FEM thrombus formation solver (scikit-fem)
   data/                    Dataset generation (LHS sampling + batch mechanistic runs) for the surrogate
@@ -449,10 +449,13 @@ thrombus-train --dataset-dir data/processed --checkpoint checkpoints/model.pt
 thrombus-benchmark --checkpoint checkpoints/model.pt --dataset-dir data/processed
 ```
 
-Each step also accepts `--training-config`/`--physio-config`/
-`--geometry-config` overrides (default to the `configs/*.yaml` files in this
-repo) and other flags -- see `--help` on each command, or the corresponding
-module's `main()` in `src/thrombus_bench/{data,neural,benchmark}/`.
+`thrombus-generate-dataset` and `thrombus-benchmark` also accept
+`--training-config`/`--physio-config`/`--geometry-config` overrides
+(default to the `configs/*.yaml` files in this repo); `thrombus-train` only
+takes `--config` (default `configs/training.yaml` -- it doesn't need
+physio/geometry parameters since it trains on already-rasterized data).
+See `--help` on each command, or the corresponding module's `main()` in
+`src/thrombus_bench/{data,neural,benchmark}/`.
 
 ### Run tests
 

@@ -46,8 +46,11 @@ pulsatile:
 # Mesh generation (mechanistic/mesh.py). The paper uses ~10,000 triangular
 # elements in COMSOL; this is intentionally coarser by default so that
 # generate_dataset.py can produce O(100-1000) simulations on CPU in
-# reasonable time. Override via Hydra CLI (mesh.target_num_elements=...) for
-# higher-fidelity single runs.
+# reasonable time. NOTE: each CLI entry point (run_simulation.py,
+# generate_dataset.py, run_benchmark.py) always overrides this value with
+# its own `--target-num-elements` flag default, so the value below is
+# effectively a placeholder unless you edit the CLI defaults too -- use the
+# flag to change mesh resolution for a given run.
 mesh:
   target_num_elements: 2000
   neck_refinement_factor: 3.0   # local element-size divisor near proximal/distal neck

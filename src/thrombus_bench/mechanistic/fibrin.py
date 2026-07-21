@@ -14,8 +14,6 @@ with k_fi^th = 59 s^-1 and k_m,fi^th = 3.16 uM (Table 1 / configs/physio_params.
 Fibrin is one of the two thrombus-viscosity trigger fields (the other being
 deposited activated platelets M_at), consumed by `flow_solver.viscosity_multiplier`
 (Eq. 18) once FI locally exceeds `fibrin.fibrin_critical_uM` (0.6 uM, Table 1).
-
-Not yet implemented -- this is a scaffolding stub.
 """
 
 from __future__ import annotations
