@@ -11,8 +11,8 @@ and `benchmark/run_benchmark.py` (the `results/report.md` bundle):
   in which field and colormap are passed).
 * `plot_speed_vs_accuracy`: scatter of runtime vs. accuracy metric across
   test-set samples, mechanistic vs. neural (the benchmark's headline plot).
-* `plot_ood_degradation`: bar comparison of in-distribution vs. OOD RMSE
-  (`benchmark/ood_eval.py`).
+* `plot_edge_holdout_degradation`: bar comparison of core-range vs.
+  edge-of-domain RMSE (`benchmark/edge_holdout_eval.py`).
 * `plot_calibration`: reliability diagram (`benchmark/calibration.py`).
 """
 
@@ -89,18 +89,19 @@ def plot_speed_vs_accuracy(runtimes: dict, accuracies: dict, ax=None):
     return ax
 
 
-def plot_ood_degradation(degradation: dict, ax=None):
-    """degradation: output of `benchmark.ood_eval.evaluate_ood_degradation`."""
+def plot_edge_holdout_degradation(degradation: dict, ax=None):
+    """degradation: output of
+    `benchmark.edge_holdout_eval.evaluate_edge_holdout_degradation`."""
 
     import matplotlib.pyplot as plt
 
     if ax is None:
         _, ax = plt.subplots()
-    labels = ["in-distribution (test)", "out-of-distribution (ood)"]
-    values = [degradation["test"]["overall"], degradation["ood"]["overall"]]
+    labels = ["core-range (test)", "edge-of-domain (edge_holdout)"]
+    values = [degradation["test"]["overall"], degradation["edge_holdout"]["overall"]]
     ax.bar(labels, values, color=["tab:blue", "tab:red"])
     ax.set_ylabel("overall field RMSE")
-    ax.set_title(f"OOD degradation ratio: {degradation['degradation_ratio']:.2f}x")
+    ax.set_title(f"Edge-holdout degradation ratio: {degradation['degradation_ratio']:.2f}x")
     return ax
 
 

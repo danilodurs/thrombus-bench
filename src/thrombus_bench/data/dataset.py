@@ -19,8 +19,9 @@ expose them as a `torch.utils.data.Dataset` yielding, per sample:
 * `max_M_at`, `thrombosed_fraction`: scalar summary targets used by
   `benchmark/metrics.py` (left in physical units, not log-compressed).
 
-Train/val/test/OOD splits are read from the corresponding subdirectory
-written by `generate_dataset.py` (`sampler.split_train_val_test_ood`).
+Train/val/test/edge-of-domain splits are read from the corresponding
+subdirectory written by `generate_dataset.py`
+(`sampler.split_train_val_test_edge_holdout`).
 """
 
 from __future__ import annotations
@@ -49,7 +50,7 @@ def log_to_field(x):
 
 
 class ThrombusSurrogateDataset(Dataset):
-    def __init__(self, dataset_dir: str, split: Literal["train", "val", "test", "ood"]):
+    def __init__(self, dataset_dir: str, split: Literal["train", "val", "test", "edge_holdout"]):
         self.dataset_dir = dataset_dir
         self.split = split
         self.files = sorted(glob.glob(os.path.join(dataset_dir, split, "sample_*.npz")))

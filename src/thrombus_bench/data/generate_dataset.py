@@ -15,7 +15,8 @@ For each parameter sample from `sampler.py`:
    fixed-shape input/target.
 4. Save each sample's rasterized fields + parameter vector + summary scalars
    (max M_at, thrombosed fraction) to `data/processed/{split}/sample_NNN.npz`.
-5. Route each sample to train/val/test/ood per `sampler.split_train_val_test_ood`.
+5. Route each sample to train/val/test/edge_holdout per
+   `sampler.split_train_val_test_edge_holdout`.
 
 Scope note: runs serially (no multiprocessing) -- scikit-fem `Basis`/`Mesh`
 objects are not trivially picklable across a `multiprocessing.Pool`, and
@@ -35,7 +36,7 @@ from scipy.interpolate import griddata
 from thrombus_bench.mechanistic.coupled_solver import run_coupled_simulation
 from thrombus_bench.mechanistic.mesh import GeometryConfig, MeshConfig, build_aneurysm_mesh
 
-from .sampler import ParameterSpace, latin_hypercube_sample, split_train_val_test_ood
+from .sampler import ParameterSpace, latin_hypercube_sample, split_train_val_test_edge_holdout
 
 _ALL_SPECIES = ("RP", "AP", "APR", "APS", "T", "AT", "PT", "FG", "FI")
 PARAM_ORDER = (
@@ -115,17 +116,18 @@ def generate_dataset(
     dt_s: float = 0.1,
     grid_size: tuple[int, int] = (32, 32),
 ) -> dict[str, int]:
-    """Run `sampler.latin_hypercube_sample` + `split_train_val_test_ood`,
+    """Run `sampler.latin_hypercube_sample` + `split_train_val_test_edge_holdout`,
     then batch-run the mechanistic solver over every sample, writing results
-    under `output_dir/{train,val,test,ood}/`. Returns the number of samples
-    written per split."""
+    under `output_dir/{train,val,test,edge_holdout}/`. Returns the number of
+    samples written per split."""
 
     space = ParameterSpace()
-    n_total = config["n_train"] + config["n_val"] + config["n_test"] + config["n_ood"]
+    n_total = config["n_train"] + config["n_val"] + config["n_test"] + config["n_edge_holdout"]
     samples = latin_hypercube_sample(space, n_total, seed=config.get("seed", 0))
-    splits = split_train_val_test_ood(
-        samples, space, ood_quantile=config["ood_quantile"],
-        n_train=config["n_train"], n_val=config["n_val"], n_test=config["n_test"], n_ood=config["n_ood"],
+    splits = split_train_val_test_edge_holdout(
+        samples, space, edge_holdout_quantile=config["edge_holdout_quantile"],
+        n_train=config["n_train"], n_val=config["n_val"], n_test=config["n_test"],
+        n_edge_holdout=config["n_edge_holdout"],
         seed=config.get("seed", 0),
     )
 

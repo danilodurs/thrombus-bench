@@ -26,7 +26,7 @@ _ALL_SPECIES = ("RP", "AP", "APR", "APS", "T", "AT", "PT", "FG", "FI")
 
 def run_flow_only(geometry_cfg: dict, mesh_cfg: dict, carreau_cfg: dict, inlet_velocity_m_s: float, output_path: str) -> None:
     """Mesh + steady flow solve only, saved as .npz. Useful for quick
-    flow-field validation without running the full transient model."""
+    flow-field verification without running the full transient model."""
 
     geom = GeometryConfig.from_preset(geometry_cfg)
     tagged_mesh = build_aneurysm_mesh(geom, mesh_cfg)

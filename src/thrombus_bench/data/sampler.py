@@ -2,8 +2,8 @@
 
 Responsibility
 ---------------
-Define the parameter space used to generate the training/val/test/OOD
-dataset for the neural surrogate, and draw stratified (Latin hypercube)
+Define the parameter space used to generate the training/val/test/
+edge-of-domain dataset for the neural surrogate, and draw stratified (Latin hypercube)
 samples from it via `scipy.stats.qmc.LatinHypercube`. Parameters, with
 physiologically-motivated ranges drawn from the paper's sensitivity studies
 (Sec. 3.3):
@@ -15,12 +15,13 @@ physiologically-motivated ranges drawn from the paper's sensitivity studies
 * Resting platelet concentration: 1e8-5e8 PLT/ml (Sec. 3.3.1 citation range).
 * Heparin concentration: 0.1-0.5 uM (Fig. 8 range).
 
-The OOD (out-of-distribution) split (`benchmark/ood_eval.py`) is carved out
-of the *extremes* of these ranges: any sample whose parameters fall in the
-outer `(1 - ood_quantile)` tail (by Euclidean distance in normalized
-parameter space from the sampled-population center) is routed to the OOD
-set instead of train/val/test, per `configs/training.yaml`
-`data.ood_quantile`.
+The edge-of-domain holdout split (`benchmark/edge_holdout_eval.py`, still
+drawn from the same sampled parameter distribution -- not a genuinely
+different population) is carved out of the *extremes* of these ranges: any
+sample whose parameters fall in the outer `(1 - edge_holdout_quantile)` tail
+(by Euclidean distance in normalized parameter space from the
+sampled-population center) is routed to this holdout set instead of
+train/val/test, per `configs/training.yaml` `data.edge_holdout_quantile`.
 """
 
 from __future__ import annotations
@@ -72,24 +73,25 @@ def latin_hypercube_sample(space: ParameterSpace, n_samples: int, seed: int = 0)
     return [dict(zip(names, row)) for row in scaled]
 
 
-def split_train_val_test_ood(
+def split_train_val_test_edge_holdout(
     samples: list[dict],
     space: ParameterSpace,
-    ood_quantile: float,
+    edge_holdout_quantile: float,
     n_train: int,
     n_val: int,
     n_test: int,
-    n_ood: int,
+    n_edge_holdout: int,
     seed: int = 0,
 ) -> dict[str, list[dict]]:
-    """Partition `samples` into train/val/test/OOD sets.
+    """Partition `samples` into train/val/test/edge-of-domain sets.
 
-    OOD samples are those farthest (in min-max-normalized parameter space,
-    Euclidean distance from the space's center) from the bulk of the
-    distribution -- i.e. drawn from the outer `(1 - ood_quantile)` tail;
-    train/val/test are drawn (via a fixed random shuffle) from the
-    remaining "in-distribution" pool. Raises `ValueError` if `samples` is
-    too small to cover all four requested split sizes.
+    Edge-of-domain samples are those farthest (in min-max-normalized
+    parameter space, Euclidean distance from the space's center) from the
+    bulk of the distribution -- i.e. drawn from the outer
+    `(1 - edge_holdout_quantile)` tail; train/val/test are drawn (via a
+    fixed random shuffle) from the remaining core-range pool. Raises
+    `ValueError` if `samples` is too small to cover all four requested split
+    sizes.
     """
 
     names = space.names
@@ -100,14 +102,14 @@ def split_train_val_test_ood(
     distance = np.linalg.norm(normalized - center, axis=1)
 
     order = np.argsort(-distance)  # farthest-from-center first
-    n_ood_actual = min(n_ood, max(0, len(samples) - (n_train + n_val + n_test)))
-    if n_ood_actual < n_ood:
+    n_edge_holdout_actual = min(n_edge_holdout, max(0, len(samples) - (n_train + n_val + n_test)))
+    if n_edge_holdout_actual < n_edge_holdout:
         raise ValueError(
-            f"Not enough samples ({len(samples)}) to cover train+val+test+ood "
-            f"({n_train}+{n_val}+{n_test}+{n_ood})."
+            f"Not enough samples ({len(samples)}) to cover train+val+test+edge_holdout "
+            f"({n_train}+{n_val}+{n_test}+{n_edge_holdout})."
         )
-    ood_idx = order[:n_ood_actual]
-    remaining_idx = order[n_ood_actual:]
+    edge_holdout_idx = order[:n_edge_holdout_actual]
+    remaining_idx = order[n_edge_holdout_actual:]
 
     rng = np.random.default_rng(seed)
     shuffled = remaining_idx[rng.permutation(len(remaining_idx))]
@@ -124,5 +126,5 @@ def split_train_val_test_ood(
         "train": [samples[i] for i in train_idx],
         "val": [samples[i] for i in val_idx],
         "test": [samples[i] for i in test_idx],
-        "ood": [samples[i] for i in ood_idx],
+        "edge_holdout": [samples[i] for i in edge_holdout_idx],
     }

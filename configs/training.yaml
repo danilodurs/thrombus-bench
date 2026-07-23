@@ -14,12 +14,15 @@ data:
   n_train: 24
   n_val: 6
   n_test: 6
-  # Explicit out-of-distribution split: parameter combinations at the
+  # Explicit edge-of-domain holdout split (still drawn from the same sampled
+  # distribution, not a different population): parameter combinations at the
   # extremes of the sampled ranges (see data/sampler.py), held out from
-  # train/val entirely and evaluated separately in benchmark/ood_eval.py.
-  n_ood: 6
-  ood_quantile: 0.9   # samples in the outer (1-quantile) tail of platelet /
-                       # heparin / inlet-velocity ranges are routed to n_ood
+  # train/val entirely and evaluated separately in
+  # benchmark/edge_holdout_eval.py.
+  n_edge_holdout: 6
+  edge_holdout_quantile: 0.9   # samples in the outer (1-quantile) tail of
+                               # platelet/heparin/inlet-velocity ranges are
+                               # routed to n_edge_holdout
 
 model:
   # Geometry/parameter encoder -> latent grid (encoder.py). latent_grid_size
@@ -62,11 +65,16 @@ physics_loss:
   # finite differences on the regular latent grid. See
   # neural/physics_losses.py docstring.
   residual_mode: finite_difference   # "autograd" or "finite_difference"
+  # Only mass_conservation and nonnegativity are implemented in
+  # neural/physics_losses.py's total_physics_loss. navier_stokes_residual is
+  # implemented but not wired in there -- besides a viscosity scalar, it
+  # needs a predicted pressure field that the surrogate doesn't output (no
+  # entry in data/dataset.FIELD_NAMES); cdr_residual and
+  # surface_flux_bc_residual are unimplemented placeholders. See that
+  # module's docstring. Weight entries for these are omitted here since
+  # train.py's weights.get(name, 0.0) would silently ignore them anyway.
   weights:
     data: 1.0
-    navier_stokes_residual: 0.1
-    cdr_residual: 0.1
-    surface_flux_bc_residual: 0.05   # mirrors Eqs. (6)-(13)
     mass_conservation: 0.05
     nonnegativity: 0.1
 

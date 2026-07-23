@@ -90,9 +90,13 @@ def total_physics_loss(predicted_fields: torch.Tensor, weights: dict, mode: str,
 
     Returns a dict of named (unweighted) loss terms; `train.py` applies
     `weights` and sums. Only `mass_conservation` and `nonnegativity` are
-    implemented (see module docstring for `navier_stokes_residual`, which
-    is available but not included in the default set since it requires a
-    representative viscosity scalar the caller must supply).
+    implemented here (see module docstring for `navier_stokes_residual`,
+    which is implemented but not wired into this default set: besides a
+    representative viscosity scalar, it needs a predicted pressure field,
+    and pressure is not one of the surrogate's output channels -- there is
+    no pressure entry in `data/dataset.FIELD_NAMES`. Wiring it in would mean
+    adding a pressure output channel through the dataset/model pipeline, not
+    just this function).
     """
 
     if mode != "finite_difference":

@@ -195,7 +195,7 @@ def solve_steady_flow(
         mesh) folding the Eq. (18) thrombus viscosity multiplier into the
         Carreau closure. Used by `coupled_solver.py` once a thrombus is
         present; omitted (multiplier == 1 everywhere) for flow-only
-        validation runs.
+        verification runs.
     """
 
     mesh = tagged_mesh.mesh

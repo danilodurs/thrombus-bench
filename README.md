@@ -1,7 +1,7 @@
 # thrombus-bench
 
 A benchmarking pipeline comparing **(A)** a mechanistic 2D thrombus formation
-model against **(B)** a biophysics-aware neural surrogate, following:
+model against **(B)** a physiology-conditioned, physics-informed neural surrogate, following:
 
 > Cardillo, G., Pouponneau, P., & Barakat, A.I. (2026). *A computational model
 > of chemically- and mechanically-induced thrombus formation in cerebral
@@ -29,25 +29,26 @@ prototype -- see the size caveats below and "Known limitations".
 | `mechanistic/activation.py`, `surface_ode.py`, `fibrin.py` | **Implemented & tested.** Chemical/mechanical activation (Appendix A/B), platelet adhesion/aggregation flux BCs + surface ODEs (Eqs. 6-7, C.1-C.20), Michaelis-Menten fibrin kinetics (Eqs. 16-17). |
 | `mechanistic/species_transport.py` | **Implemented & tested.** SUPG-stabilized implicit transport (huge Péclet numbers given Table 1's tiny diffusivities) + vectorized implicit reaction substepping (stiff kinetics, e.g. Eq. A.10's Γ reaching ~1e4 s⁻¹). |
 | `mechanistic/coupled_solver.py`, `run_simulation.py` | **Implemented & tested.** Full transient Stokes+CDR+surface-ODE coupling loop; CLI supports both flow-only and full-transient runs. See "Known limitations" re: thrombin/fibrin calibration. |
-| `data/sampler.py`, `generate_dataset.py`, `dataset.py` | **Implemented & tested.** LHS sampling + OOD-tail split, batch mechanistic runs with grid rasterization, PyTorch `Dataset`. |
+| `data/sampler.py`, `generate_dataset.py`, `dataset.py` | **Implemented & tested.** LHS sampling + edge-of-domain tail split, batch mechanistic runs with grid rasterization, PyTorch `Dataset`. |
 | `neural/encoder.py`, `operator_core.py`, `model.py`, `train.py` | **Implemented & tested.** FiLM-conditioned encoder + a real (if small) Fourier Neural Operator; `operator_core.type: gnn` is a documented, deliberately-unimplemented extension point. |
 | `neural/physics_losses.py` | **Partially implemented.** `mass_conservation` and `nonnegativity` penalties (finite-difference mode) are implemented; `cdr_residual`, `surface_flux_bc_residual`, and `autograd` residual mode are not (see module docstring). |
 | `neural/uncertainty.py` | **Implemented & tested.** MC-dropout and deep-ensemble wrappers. |
-| `benchmark/metrics.py`, `ood_eval.py`, `calibration.py`, `run_benchmark.py` | **Implemented & tested.** Field RMSE, OOD degradation, UQ calibration (reliability diagram + ECE), runtime comparison, Markdown+PNG report. `thrombus_height_error`/`time_to_onset_error`/`physics_residual_audit` are not implemented (need full spatiotemporal fields this project's dataset doesn't save -- see `metrics.py` docstring). |
+| `benchmark/metrics.py`, `edge_holdout_eval.py`, `calibration.py`, `run_benchmark.py` | **Implemented & tested.** Field RMSE, edge-of-domain degradation, UQ calibration (reliability diagram + ECE), runtime comparison, Markdown+PNG report. `thrombus_height_error`/`time_to_onset_error`/`physics_residual_audit` are not implemented (need full spatiotemporal fields this project's dataset doesn't save -- see `metrics.py` docstring). |
 | `viz/plots.py` | **Implemented.** |
 
-Run `pytest` — the full suite passes (mechanistic solver validation,
-surface ODE unit tests, species transport, coupled-solver integration
-tests, neural forward/gradient tests, benchmark metric tests).
+Run `pytest` — the full suite passes (mechanistic solver verification
+against analytical/sanity cases, surface ODE unit tests, species transport,
+coupled-solver integration tests, neural forward/gradient tests, benchmark
+metric tests).
 
-**Scale caveat:** `configs/training.yaml`'s defaults (24/6/6/6 train/val/
-test/ood samples, 32×32 grid, 40 epochs) are a *reduced-scale demo*, not
-the full O(100-1000)-sample dataset originally scoped — chosen so the
-entire pipeline (`thrombus-generate-dataset` → `thrombus-train` →
-`thrombus-benchmark`) runs in a few minutes on CPU in one session. Scale up
-`data.n_train`/`n_val`/`n_test`/`n_ood` and `optim.epochs` for a more
-statistically meaningful benchmark; nothing in the code depends on these
-particular values.
+**Scale caveat:** `configs/training.yaml`'s defaults (24/6/6/6
+train/val/test/edge_holdout samples, 32×32 grid, 40 epochs) are a
+*reduced-scale demo*, not the full O(100-1000)-sample dataset originally
+scoped — chosen so the entire pipeline (`thrombus-generate-dataset` →
+`thrombus-train` → `thrombus-benchmark`) runs in a few minutes on CPU in one
+session. Scale up `data.n_train`/`n_val`/`n_test`/`n_edge_holdout` and
+`optim.epochs` for a more statistically meaningful benchmark; nothing in the
+code depends on these particular values.
 
 ## Architecture
 
@@ -100,7 +101,7 @@ mesh.py (Delaunay vessel+aneurysm) ──▶ built once, reused every step
                                      (repeat until end_time_s)
 ```
 
-### (B) Neural surrogate — hybrid (biophysics-aware) architecture
+### (B) Neural surrogate — hybrid (physiology-conditioned, physics-informed) architecture
 
 "Hybrid" here means the model itself, not the comparison: a data-driven
 Fourier Neural Operator conditioned on the same geometry/physiological
@@ -161,7 +162,7 @@ end-to-end pipeline:
 ```
 data/sampler.py                data/generate_dataset.py
 (LHS sampling +      ──▶       batch-runs (A) mechanistic model per
- OOD-tail split)                sample, rasterizes fields to a fixed
+ edge_holdout-tail split)       sample, rasterizes fields to a fixed
                                  grid, writes data/processed/{split}/
                                  sample_NNN.npz
                                        │
@@ -182,8 +183,9 @@ data/sampler.py                data/generate_dataset.py
                                        │
                                        ▼
                         thrombus-benchmark  (CLI)
-                        benchmark/run_benchmark.py: evaluate on test+ood,
-                        compute metrics/ood_eval/calibration, time a fresh
+                        benchmark/run_benchmark.py: evaluate on
+                        test+edge_holdout, compute metrics/edge_holdout_eval/
+                        calibration, time a fresh
                         mechanistic re-solve, render viz/plots.py
                                        │
                                        ▼
@@ -400,7 +402,7 @@ src/thrombus_bench/
   mechanistic/             2D FEM thrombus formation solver (scikit-fem)
   data/                    Dataset generation (LHS sampling + batch mechanistic runs) for the surrogate
   neural/                  Neural surrogate (encoder + FNO core [GNN unimplemented] + physics-informed losses + UQ)
-  benchmark/               Accuracy/runtime/OOD/calibration metrics + report generation
+  benchmark/               Accuracy/runtime/edge-of-domain/calibration metrics + report generation
   viz/                     Plotting utilities
 tests/                     pytest suite
 notebooks/                 Exploratory notebooks
@@ -473,7 +475,8 @@ pytest
   value comes from, and inline notes on assumptions (see "Assumptions &
   Deviations" above).
 - `configs/training.yaml`: neural surrogate architecture, physics-loss
-  weights, optimizer, and dataset split sizes (including the OOD split).
+  weights, optimizer, and dataset split sizes (including the edge-of-domain
+  holdout split).
 
 ## Contributors
 

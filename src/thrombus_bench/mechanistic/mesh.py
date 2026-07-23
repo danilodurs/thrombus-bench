@@ -7,7 +7,7 @@ Build the triangular meshes used by every downstream mechanistic module
 coupled_solver). Two geometries are produced:
 
 1. ``build_channel_mesh``: a plain structured rectangular channel (no
-   aneurysm). Used for validation/sanity cases (e.g. Poiseuille flow, mass
+   aneurysm). Used for verification/sanity cases (e.g. Poiseuille flow, mass
    conservation) where an analytical or trivially-checkable reference
    solution exists.
 2. ``build_aneurysm_mesh``: the idealized 2D aneurysm domain of Cardillo,
@@ -108,7 +108,7 @@ class TaggedMesh:
 def build_channel_mesh(
     length_mm: float, diameter_mm: float, target_num_elements: int = 400
 ) -> TaggedMesh:
-    """Structured rectangular channel mesh (no aneurysm) for validation cases.
+    """Structured rectangular channel mesh (no aneurysm) for verification cases.
 
     Boundaries: ``inlet`` (x=0), ``outlet`` (x=length), ``wall_vessel``
     (y=0 and y=diameter). ``wall_sac`` is present but always empty (kept so
