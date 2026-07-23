@@ -86,6 +86,12 @@ class CoupledSimulationHistory:
     basis_c: Basis
     states: list = field(default_factory=list)  # list[CoupledSimulationState]
     thrombin_fibrin_reliable: bool = True
+    # Per-species count of DOF values whose *uncapped* concentration
+    # exceeded `concentration_cap` at some point during the run, summed
+    # across every macro step (not just the final one) -- see
+    # `_count_clip_events`'s docstring for why cumulative rather than
+    # final-step-only.
+    clip_event_counts: dict = field(default_factory=lambda: {name: 0 for name in _ALL_SPECIES})
 
 
 def _thrombin_fibrin_cap_exceeded(new_concentrations: dict, concentration_cap: dict) -> bool:
@@ -99,6 +105,20 @@ def _thrombin_fibrin_cap_exceeded(new_concentrations: dict, concentration_cap: d
         np.any(new_concentrations["T"] > concentration_cap["T"])
         or np.any(new_concentrations["FI"] > concentration_cap["FI"])
     )
+
+
+def _count_clip_events(new_concentrations: dict, concentration_cap: dict) -> dict[str, int]:
+    """Per-species count of DOF values whose *uncapped* concentration this
+    step exceeded `concentration_cap` -- i.e. how many entries the `np.clip`
+    below actually changes. Tracked cumulatively across all macro steps
+    (summed into `CoupledSimulationHistory.clip_event_counts`) rather than
+    only checked at the final step: a species can spike and get clipped in
+    the middle of a run without still being clipped at the end, and a
+    final-step-only count would silently miss that. Cumulative tracking is
+    just one extra per-step sum per species, so there's no real cost
+    tradeoff against a final-step check."""
+
+    return {name: int(np.sum(conc > concentration_cap[name])) for name, conc in new_concentrations.items()}
 
 
 def _wall_branches(basis_c: Basis, vessel_diameter_m: float) -> tuple[np.ndarray, np.ndarray]:
@@ -264,6 +284,7 @@ def run_coupled_simulation(
     concentrations = {name: np.full(basis_c.N, inlet_value[name]) for name in _ALL_SPECIES}
     concentrations["T"] = np.zeros(basis_c.N)  # thrombin initial = 0 throughout, not just at inlet
     thrombin_fibrin_reliable = True
+    clip_event_counts = {name: 0 for name in _ALL_SPECIES}
 
     top_branch, bottom_branch = _wall_branches(basis_c, vessel_diameter_m)
     wall_dofs = np.union1d(top_branch, bottom_branch)
@@ -418,6 +439,8 @@ def run_coupled_simulation(
         # filter or weight by it instead of trusting capped values outright.
         if _thrombin_fibrin_cap_exceeded(new_concentrations, concentration_cap):
             thrombin_fibrin_reliable = False
+        for name, count in _count_clip_events(new_concentrations, concentration_cap).items():
+            clip_event_counts[name] += count
         concentrations = {
             k: np.clip(v, 0.0, concentration_cap[k]) for k, v in new_concentrations.items()
         }
@@ -453,4 +476,5 @@ def run_coupled_simulation(
             )
 
     history.thrombin_fibrin_reliable = thrombin_fibrin_reliable
+    history.clip_event_counts = clip_event_counts
     return history

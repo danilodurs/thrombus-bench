@@ -14,12 +14,22 @@ For each parameter sample from `sampler.py`:
    connectivity varies per sample but the neural surrogate needs a
    fixed-shape input/target.
 4. Save each sample's rasterized fields + parameter vector + summary scalars
-   (max M_at, thrombosed fraction, `thrombin_fibrin_reliable` -- see
-   `mechanistic/coupled_solver.CoupledSimulationHistory` docstring; False
-   whenever the run's [T]/[FI] concentration-cap safety clip actually bound,
-   flagging that sample's T/FI (and downstream FI-derived fields) as
-   not physically trustworthy rather than silently capping them) to
-   `data/processed/{split}/sample_NNN.npz`.
+   to `data/processed/{split}/sample_NNN.npz`: `max_M_at`,
+   `thrombosed_fraction`, `converged` (flow Picard convergence),
+   `flow_n_iterations`/`flow_residual` (`mechanistic/flow_solver.
+   FlowSolution`'s final-checkpoint Picard diagnostics), `thrombin_fibrin_
+   reliable` (see `mechanistic/coupled_solver.CoupledSimulationHistory`
+   docstring; False whenever the run's [T]/[FI] concentration-cap safety
+   clip actually bound, flagging that sample's T/FI -- and downstream
+   FI-derived fields -- as not physically trustworthy rather than silently
+   capping them), `clip_count_{species}` (per-species cumulative
+   concentration-cap clip-event count over the whole run, from
+   `CoupledSimulationHistory.clip_event_counts`), and `conc_{species}_min`/
+   `conc_{species}_max` (raw nodal field extrema, pre-rasterization -- a
+   cheap way to spot NaN/Inf/out-of-range values without scanning the full
+   grid). This is this project's only per-sample QC signal beyond visual
+   inspection; none of it is consumed by training/evaluation automatically
+   -- see `data/dataset.py`'s docstring for how to read it back.
 5. Route each sample to train/val/test/edge_holdout per
    `sampler.split_train_val_test_edge_holdout`.
 
@@ -95,22 +105,58 @@ def _run_one_sample(sample: dict, physio_base: dict, mesh_cfg: dict, end_time_s:
         "velocity_x": _rasterize(node_coords, ux, grid_size),
         "velocity_y": _rasterize(node_coords, uy, grid_size),
     }
+    conc_min_max = {}
     for name in _ALL_SPECIES:
-        fields[f"conc_{name}"] = _rasterize(node_coords, final.concentrations[name][:n_vertices], grid_size)
+        nodal = final.concentrations[name][:n_vertices]
+        fields[f"conc_{name}"] = _rasterize(node_coords, nodal, grid_size)
+        # Cheap min/max of the raw (pre-rasterization) nodal field -- lets a
+        # QC pass spot NaN/Inf or wildly out-of-range values at a glance
+        # without having to load and scan the full rasterized grid.
+        conc_min_max[f"conc_{name}_min"] = float(np.min(nodal))
+        conc_min_max[f"conc_{name}_max"] = float(np.max(nodal))
 
     params = np.array([sample[name] for name in PARAM_ORDER], dtype=np.float64)
     M_at_critical = physio["adhesion_aggregation"]["M_at_critical_plt_cm2"]
     max_M_at = float(final.surface.M_at.max())
     thrombosed_fraction = float(np.mean(final.surface.M_at >= M_at_critical))
 
+    clip_counts = {f"clip_count_{name}": int(history.clip_event_counts[name]) for name in _ALL_SPECIES}
+
     return {
         "params": params,
         "max_M_at": max_M_at,
         "thrombosed_fraction": thrombosed_fraction,
         "converged": bool(final.flow.converged),
+        "flow_n_iterations": int(final.flow.n_iterations),
+        "flow_residual": float(final.flow.residual),
         "thrombin_fibrin_reliable": bool(history.thrombin_fibrin_reliable),
+        **clip_counts,
+        **conc_min_max,
         **fields,
     }
+
+
+def _new_qc_summary() -> dict:
+    return {
+        "n_samples": 0,
+        "n_converged": 0,
+        "n_thrombin_fibrin_reliable": 0,
+        "n_samples_clip_hit": {name: 0 for name in _ALL_SPECIES},
+    }
+
+
+def _update_qc_summary(qc: dict, result: dict) -> None:
+    """Accumulate one sample's QC fields (see `_run_one_sample`'s return
+    dict) into the running per-run summary `main()` prints -- sample-level
+    counts (how many samples were affected), not raw per-node clip-event
+    totals."""
+
+    qc["n_samples"] += 1
+    qc["n_converged"] += int(result["converged"])
+    qc["n_thrombin_fibrin_reliable"] += int(result["thrombin_fibrin_reliable"])
+    for name in _ALL_SPECIES:
+        if result[f"clip_count_{name}"] > 0:
+            qc["n_samples_clip_hit"][name] += 1
 
 
 def generate_dataset(
@@ -121,11 +167,14 @@ def generate_dataset(
     end_time_s: float = 1.0,
     dt_s: float = 0.1,
     grid_size: tuple[int, int] = (32, 32),
-) -> dict[str, int]:
+) -> tuple[dict[str, int], dict]:
     """Run `sampler.latin_hypercube_sample` + `split_train_val_test_edge_holdout`,
     then batch-run the mechanistic solver over every sample, writing results
-    under `output_dir/{train,val,test,edge_holdout}/`. Returns the number of
-    samples written per split."""
+    under `output_dir/{train,val,test,edge_holdout}/`. Returns
+    `(counts, qc_summary)`: the number of samples written per split, and an
+    aggregate QC summary (see `_new_qc_summary`) across all splits combined,
+    for `main()`'s printout -- see `_run_one_sample`'s docstring for what
+    each per-sample QC field means."""
 
     space = ParameterSpace()
     n_total = config["n_train"] + config["n_val"] + config["n_test"] + config["n_edge_holdout"]
@@ -138,14 +187,16 @@ def generate_dataset(
     )
 
     counts = {}
+    qc_summary = _new_qc_summary()
     for split_name, split_samples in splits.items():
         split_dir = os.path.join(output_dir, split_name)
         os.makedirs(split_dir, exist_ok=True)
         for i, sample in enumerate(split_samples):
             result = _run_one_sample(sample, physio_base, geometry_mesh_cfg, end_time_s, dt_s, grid_size)
             np.savez(os.path.join(split_dir, f"sample_{i:04d}.npz"), **result)
+            _update_qc_summary(qc_summary, result)
         counts[split_name] = len(split_samples)
-    return counts
+    return counts, qc_summary
 
 
 def main() -> None:
@@ -169,11 +220,29 @@ def main() -> None:
     mesh_cfg = dict(geometry_yaml["mesh"])
     mesh_cfg["target_num_elements"] = args.target_num_elements
 
-    counts = generate_dataset(
+    counts, qc = generate_dataset(
         training_cfg["data"], physio_base, mesh_cfg, args.output_dir,
         end_time_s=args.end_time_s, dt_s=args.dt_s, grid_size=(args.grid_size, args.grid_size),
     )
     print(f"Wrote dataset to {args.output_dir}: {counts}")
+    _print_qc_summary(qc)
+
+
+def _print_qc_summary(qc: dict) -> None:
+    n = qc["n_samples"]
+    print(f"\nQC summary ({n} samples total):")
+    print(f"  {qc['n_converged']}/{n} samples converged (flow_solver Picard iteration).")
+    print(
+        f"  {n - qc['n_thrombin_fibrin_reliable']}/{n} samples hit the concentration cap for "
+        "[T] or [FI] at some point (thrombin_fibrin_reliable=False -- see README.md "
+        '"Known limitations").'
+    )
+    clip_hit = {name: count for name, count in qc["n_samples_clip_hit"].items() if count > 0}
+    if clip_hit:
+        per_species = ", ".join(f"{name}: {count}/{n}" for name, count in clip_hit.items())
+        print(f"  Samples that hit the concentration cap, per species: {per_species}.")
+    else:
+        print("  No sample hit the concentration cap for any species.")
 
 
 if __name__ == "__main__":

@@ -25,6 +25,19 @@ expose them as a `torch.utils.data.Dataset` yielding, per sample:
   sample's `conc_T`/`conc_FI` channels (and `FI`-derived quantities) should
   not be treated as physically meaningful without filtering/weighting by
   this flag downstream.
+* `flow_n_iterations`, `flow_residual`: the final-checkpoint flow solve's
+  Picard-iteration diagnostics (`mechanistic/flow_solver.FlowSolution`),
+  alongside `converged`'s pass/fail summary of the same thing (not currently
+  exposed here -- see `generate_dataset.py`'s saved `converged` key if
+  needed).
+* `clip_counts`, `conc_min`, `conc_max`: shape-`(9,)` QC arrays, one entry
+  per species in the same order as `fields`'s species channels (`FIELD_
+  NAMES[2:]`, i.e. RP/AP/APR/APS/T/AT/PT/FG/FI). `clip_counts` is each
+  species' cumulative concentration-cap clip-event count over the whole run
+  (`CoupledSimulationHistory.clip_event_counts`); `conc_min`/`conc_max` are
+  each species' raw (pre-rasterization, pre-log-compression) nodal field
+  extrema -- a cheap way to spot NaN/Inf/out-of-range values without
+  decoding `fields`.
 
 Train/val/test/edge-of-domain splits are read from the corresponding
 subdirectory written by `generate_dataset.py`
@@ -42,6 +55,10 @@ import torch
 from torch.utils.data import Dataset
 
 FIELD_NAMES = ("velocity_x", "velocity_y", "conc_RP", "conc_AP", "conc_APR", "conc_APS", "conc_T", "conc_AT", "conc_PT", "conc_FG", "conc_FI")
+# Species name order for the `clip_counts`/`conc_min`/`conc_max` QC arrays,
+# matching `FIELD_NAMES`'s species channels (derived rather than
+# re-declared, so the two can't drift apart).
+_SPECIES_NAMES = tuple(name[len("conc_") :] for name in FIELD_NAMES if name.startswith("conc_"))
 
 
 def field_to_log(x):
@@ -77,4 +94,15 @@ class ThrombusSurrogateDataset(Dataset):
             "max_M_at": torch.tensor(float(data["max_M_at"]), dtype=torch.float32),
             "thrombosed_fraction": torch.tensor(float(data["thrombosed_fraction"]), dtype=torch.float32),
             "thrombin_fibrin_reliable": torch.tensor(bool(data["thrombin_fibrin_reliable"]), dtype=torch.bool),
+            "flow_n_iterations": torch.tensor(int(data["flow_n_iterations"]), dtype=torch.int64),
+            "flow_residual": torch.tensor(float(data["flow_residual"]), dtype=torch.float32),
+            "clip_counts": torch.tensor(
+                [int(data[f"clip_count_{name}"]) for name in _SPECIES_NAMES], dtype=torch.int64
+            ),
+            "conc_min": torch.tensor(
+                [float(data[f"conc_{name}_min"]) for name in _SPECIES_NAMES], dtype=torch.float32
+            ),
+            "conc_max": torch.tensor(
+                [float(data[f"conc_{name}_max"]) for name in _SPECIES_NAMES], dtype=torch.float32
+            ),
         }
