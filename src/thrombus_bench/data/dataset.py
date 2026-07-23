@@ -18,6 +18,13 @@ expose them as a `torch.utils.data.Dataset` yielding, per sample:
   invert back to physical units (e.g. in `benchmark/metrics.py`).
 * `max_M_at`, `thrombosed_fraction`: scalar summary targets used by
   `benchmark/metrics.py` (left in physical units, not log-compressed).
+* `thrombin_fibrin_reliable`: bool scalar, False whenever
+  `mechanistic/coupled_solver.py`'s [T]/[FI] concentration-cap safety clip
+  actually bound during that sample's run (see
+  `CoupledSimulationHistory`/`generate_dataset.py` docstrings) -- this
+  sample's `conc_T`/`conc_FI` channels (and `FI`-derived quantities) should
+  not be treated as physically meaningful without filtering/weighting by
+  this flag downstream.
 
 Train/val/test/edge-of-domain splits are read from the corresponding
 subdirectory written by `generate_dataset.py`
@@ -69,4 +76,5 @@ class ThrombusSurrogateDataset(Dataset):
             "fields": torch.from_numpy(fields),
             "max_M_at": torch.tensor(float(data["max_M_at"]), dtype=torch.float32),
             "thrombosed_fraction": torch.tensor(float(data["thrombosed_fraction"]), dtype=torch.float32),
+            "thrombin_fibrin_reliable": torch.tensor(bool(data["thrombin_fibrin_reliable"]), dtype=torch.bool),
         }

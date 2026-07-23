@@ -368,20 +368,40 @@ relevant module's docstring:
 
 ## Known limitations
 
-- **Thrombin/fibrin generation is not well-calibrated.** The surface
-  thrombin-generation flux (Eqs. C.5-C.6, via `phi_at`/`phi_rt` on M_at/M_r)
-  combined with Eq. (A.10)'s Γ -- which *saturates* rather than
-  accelerates as `[T]` grows, since T appears in Γ's denominator --
-  produces runaway growth in `[T]` (and downstream `[FI]`) over timescales
-  of seconds in the current coupling scheme, well beyond physiological
-  ranges (~0.1-10 µM). This was not resolved despite the unit
-  reconciliation above (independently verified correct via an isolated
-  mass-balance check). A generous concentration cap
-  (`coupled_solver.py`'s `concentration_cap`) keeps simulations numerically
-  bounded rather than diverging, but `[T]`/`[FI]` values from
-  `run_coupled_simulation`/`generate_dataset.py` should not be treated as
-  physically meaningful without further recalibration against a reference
-  implementation this project does not have access to.
+- **Thrombin/fibrin generation is not well-calibrated -- now flagged in the
+  data rather than silently clipped.** The surface thrombin-generation flux
+  (Eqs. C.5-C.6, via `phi_at`/`phi_rt` on M_at/M_r) combined with Eq.
+  (A.10)'s Γ -- which *saturates* rather than accelerates as `[T]` grows,
+  since T appears in Γ's denominator -- can produce runaway growth in `[T]`
+  (and downstream `[FI]`) over timescales of seconds in the current coupling
+  scheme, well beyond physiological ranges (~0.1-10 µM). An isolated
+  single-node diagnostic (`scripts/diagnose_thrombin_reaction_stiffness.py`;
+  no spatial transport) compared `species_transport.reaction_step`'s
+  implicit substepping against an independent high-accuracy
+  `scipy.integrate.solve_ivp` reference on the identical local reaction ODE,
+  with and without a representative C.5-C.6-shaped term. This ruled out the
+  substepping scheme as the cause (the two integrators track each other
+  closely) and showed the local reaction system is actually *self-limiting*
+  once local PT/FG are exhausted -- not intrinsically divergent on its own.
+  The sustained runaway therefore appears to require *this project's*
+  transport-coupling (continuous PT/FG resupply at the wall across many
+  macro steps, a mechanism the isolated diagnostic can't exercise),
+  compounded by how sensitive the C.5-C.6 term's magnitude is to the
+  `CM2_TO_M2` areal SI conversion (`coupled_solver.py`; a ~1e4x lever). This
+  was not resolved despite the unit reconciliation above (independently
+  verified correct via an isolated mass-balance check), and no single
+  definite bug has been pinned down -- so rather than inventing an
+  unsupported fix, `run_coupled_simulation` now returns a
+  `thrombin_fibrin_reliable` flag on its `CoupledSimulationHistory` (False
+  whenever `concentration_cap` actually bound for T or FI during the run),
+  threaded through `generate_dataset.py`'s saved `.npz` samples and
+  `dataset.py`'s `ThrombusSurrogateDataset.__getitem__` output. `[T]`/`[FI]`
+  values from `run_coupled_simulation`/`generate_dataset.py` should still
+  not be treated as physically meaningful without further recalibration
+  against a reference implementation this project does not have access to
+  -- but downstream training/evaluation code can now filter or weight
+  samples by `thrombin_fibrin_reliable` instead of silently trusting capped
+  values.
 - **No quantitative validation against the paper's reported results.**
   Fig. 4's ~120-minute thrombus height comparison is far outside what this
   project's demo-scale runs simulate (seconds, per the scale caveat above);

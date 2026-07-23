@@ -70,11 +70,35 @@ class CoupledSimulationState:
 
 @dataclass
 class CoupledSimulationHistory:
-    """Checkpointed states over the run, plus the (fixed) mesh/basis used."""
+    """Checkpointed states over the run, plus the (fixed) mesh/basis used.
+
+    `thrombin_fibrin_reliable` is False if `concentration_cap` was ever
+    exceeded (pre-clip) for T or FI at any step of the run -- see the
+    "Known limitation" comment near `concentration_cap`'s point of use in
+    `run_coupled_simulation` and README.md "Known limitations". It does NOT
+    mean the *current* checkpoint's T/FI values are capped -- only that
+    the run passed through a state where the uncapped reaction/flux
+    generated more T or FI than the physiologically-motivated safety bound,
+    at some point up to and including this checkpoint.
+    """
 
     tagged_mesh: TaggedMesh
     basis_c: Basis
     states: list = field(default_factory=list)  # list[CoupledSimulationState]
+    thrombin_fibrin_reliable: bool = True
+
+
+def _thrombin_fibrin_cap_exceeded(new_concentrations: dict, concentration_cap: dict) -> bool:
+    """True if the *uncapped* (pre-clip) T or FI concentration exceeds
+    `concentration_cap` anywhere -- i.e. the safety clip would actually do
+    something for one of these two species this step. Checked before
+    `np.clip` is applied so a value sitting exactly at the cap by
+    coincidence isn't misreported (`>`, not `>=`)."""
+
+    return bool(
+        np.any(new_concentrations["T"] > concentration_cap["T"])
+        or np.any(new_concentrations["FI"] > concentration_cap["FI"])
+    )
 
 
 def _wall_branches(basis_c: Basis, vessel_diameter_m: float) -> tuple[np.ndarray, np.ndarray]:
@@ -239,6 +263,7 @@ def run_coupled_simulation(
 
     concentrations = {name: np.full(basis_c.N, inlet_value[name]) for name in _ALL_SPECIES}
     concentrations["T"] = np.zeros(basis_c.N)  # thrombin initial = 0 throughout, not just at inlet
+    thrombin_fibrin_reliable = True
 
     top_branch, bottom_branch = _wall_branches(basis_c, vessel_diameter_m)
     wall_dofs = np.union1d(top_branch, bottom_branch)
@@ -366,20 +391,33 @@ def run_coupled_simulation(
         # Known limitation: the surface thrombin-generation flux (Eqs.
         # C.5-C.6, via phi_at/phi_rt on M_at/M_r) combined with Eq. (A.10)'s
         # Gamma -- which *saturates* rather than accelerates as [T] grows,
-        # since T appears in Gamma's denominator -- produces unbounded
+        # since T appears in Gamma's denominator -- can produce unbounded
         # positive-feedback growth in [T] (and, downstream, [FI]) over
         # timescales of seconds in this coupling scheme, well beyond
-        # physiological ranges (~0.1-10 uM). This was not resolved by the
-        # unit reconciliation applied elsewhere in this module (verified
-        # correct via an isolated wall-flux mass-balance check) and likely
-        # reflects either a further scaling issue specific to the C.5-C.6
-        # pathway or a genuine sensitivity of the model as reconstructed
-        # (see surface_ode.py's "Reconstruction note") that would need
-        # comparison against the paper's own (unavailable) reference
-        # implementation to fully resolve. A generous concentration cap is
-        # applied as a numerical safety net so simulations remain bounded
-        # and finite rather than diverging; see README.md "Assumptions &
-        # Deviations from Source Paper" / "Known limitations".
+        # physiological ranges (~0.1-10 uM). An isolated single-node
+        # diagnostic (no spatial transport; see scripts/
+        # diagnose_thrombin_reaction_stiffness.py) ruled out
+        # `species_transport.reaction_step`'s substepping as the cause -- it
+        # tracks a high-accuracy `scipy.integrate.solve_ivp` reference
+        # closely, and the local reaction system alone is actually
+        # self-limiting once local PT/FG are exhausted, not intrinsically
+        # divergent. The sustained runaway therefore appears to require
+        # *this* module's continuous transport-driven resupply of PT/FG at
+        # the wall across many macro steps (a coupling-order effect, not a
+        # local-ODE instability), compounded by how sensitive the C.5-C.6
+        # term's magnitude is to the CM2_TO_M2 areal SI conversion above (a
+        # ~1e4x lever). Neither has been confirmed as a definite bug (the
+        # unit reconciliation was independently verified via an isolated
+        # wall-flux mass-balance check) -- see README.md "Known
+        # limitations" for the current status. Rather than silently
+        # clipping and treating [T]/[FI] as trustworthy, this cap is now
+        # paired with an explicit `thrombin_fibrin_reliable` flag (set False
+        # whenever the cap actually binds for T or FI) threaded through
+        # `CoupledSimulationHistory` -> `data/generate_dataset.py` ->
+        # `data/dataset.py`, so downstream training/evaluation code can
+        # filter or weight by it instead of trusting capped values outright.
+        if _thrombin_fibrin_cap_exceeded(new_concentrations, concentration_cap):
+            thrombin_fibrin_reliable = False
         concentrations = {
             k: np.clip(v, 0.0, concentration_cap[k]) for k, v in new_concentrations.items()
         }
@@ -414,4 +452,5 @@ def run_coupled_simulation(
                 )
             )
 
+    history.thrombin_fibrin_reliable = thrombin_fibrin_reliable
     return history

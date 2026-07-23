@@ -14,7 +14,12 @@ For each parameter sample from `sampler.py`:
    connectivity varies per sample but the neural surrogate needs a
    fixed-shape input/target.
 4. Save each sample's rasterized fields + parameter vector + summary scalars
-   (max M_at, thrombosed fraction) to `data/processed/{split}/sample_NNN.npz`.
+   (max M_at, thrombosed fraction, `thrombin_fibrin_reliable` -- see
+   `mechanistic/coupled_solver.CoupledSimulationHistory` docstring; False
+   whenever the run's [T]/[FI] concentration-cap safety clip actually bound,
+   flagging that sample's T/FI (and downstream FI-derived fields) as
+   not physically trustworthy rather than silently capping them) to
+   `data/processed/{split}/sample_NNN.npz`.
 5. Route each sample to train/val/test/edge_holdout per
    `sampler.split_train_val_test_edge_holdout`.
 
@@ -103,6 +108,7 @@ def _run_one_sample(sample: dict, physio_base: dict, mesh_cfg: dict, end_time_s:
         "max_M_at": max_M_at,
         "thrombosed_fraction": thrombosed_fraction,
         "converged": bool(final.flow.converged),
+        "thrombin_fibrin_reliable": bool(history.thrombin_fibrin_reliable),
         **fields,
     }
 
