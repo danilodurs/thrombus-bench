@@ -15,7 +15,13 @@ End-to-end benchmark entrypoint:
    `model.uncertainty.method` -- see `_build_uncertainty_wrapper`'s
    docstring for the deep-ensemble path's known limitation), and a runtime
    comparison (neural forward-pass time vs. a freshly re-timed mechanistic
-   solve on a handful of test-set parameter vectors).
+   solve on a handful of test-set parameter vectors). If the checkpoint was
+   trained with `model.predict_M_at_wall: true` (`neural/model.py`), also
+   computes `benchmark/metrics.thrombus_mask`/`thrombus_iou` between
+   predicted and reference thrombosed-region masks on the test split (see
+   `_FieldChannelsOnly` for how the resulting 12-channel predictions are
+   kept from leaking into the metrics above, which only know about the
+   original 11 physical field channels).
 3. Fit `neural/baselines.py`'s `MeanFieldBaseline`/`NearestNeighborBaseline`
    on the train split and compute the same field RMSE (all-cells and
    fluid-only) for them alongside the FNO surrogate, on both the test and
@@ -37,10 +43,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.nn as nn
 import yaml
 from torch.utils.data import DataLoader
 
-from ..data.dataset import ThrombusSurrogateDataset
+from ..data.dataset import FIELD_NAMES, ThrombusSurrogateDataset, log_to_field
 from ..mechanistic.coupled_solver import run_coupled_simulation
 from ..mechanistic.mesh import GeometryConfig, build_aneurysm_mesh
 from ..neural.baselines import MeanFieldBaseline, NearestNeighborBaseline
@@ -48,7 +55,7 @@ from ..neural.model import ThrombusSurrogate
 from ..neural.uncertainty import DeepEnsemble, MCDropoutWrapper
 from . import calibration as calibration_mod
 from . import edge_holdout_eval as edge_holdout_eval_mod
-from .metrics import field_rmse, runtime_comparison
+from .metrics import field_rmse, runtime_comparison, thrombus_iou, thrombus_mask
 from ..data.generate_dataset import PARAM_ORDER
 from ..data.sampler import ParameterSpace, denormalize_params
 from ..viz import plots as plots_mod
@@ -77,7 +84,30 @@ def _time_mechanistic_solve(params_row: np.ndarray, physio_base: dict, mesh_cfg:
     return time.perf_counter() - t0
 
 
-def _build_uncertainty_wrapper(model: ThrombusSurrogate, model_cfg: dict, uncertainty_cfg: dict):
+class _FieldChannelsOnly(nn.Module):
+    """Wraps a `ThrombusSurrogate` so `forward()` only ever returns its
+    first `n_field_channels` channels -- a no-op when the model wasn't
+    built with `predict_M_at_wall` (its output already has exactly that
+    many channels), but necessary when it was: `edge_holdout_eval.py`,
+    `calibration.py`, and the accuracy/baseline-comparison metrics below
+    all compare a model's prediction directly against `batch["fields"]`
+    (always `len(FIELD_NAMES)` channels) and have no notion of an extra
+    `M_at_wall` channel -- passing them the raw 12-channel prediction would
+    be a shape mismatch. `.eval()`/`.modules()` (used by
+    `neural.uncertainty._enable_mc_dropout`) still reach the wrapped
+    model's submodules normally, since `self.model` is a regular
+    registered submodule."""
+
+    def __init__(self, model: nn.Module, n_field_channels: int):
+        super().__init__()
+        self.model = model
+        self.n_field_channels = n_field_channels
+
+    def forward(self, params: torch.Tensor) -> torch.Tensor:
+        return self.model(params)[:, : self.n_field_channels]
+
+
+def _build_uncertainty_wrapper(model: nn.Module, model_cfg: dict, uncertainty_cfg: dict, n_field_channels: int):
     """Dispatch to `DeepEnsemble` or `MCDropoutWrapper` per
     `configs/training.yaml` `model.uncertainty.method`.
 
@@ -90,11 +120,20 @@ def _build_uncertainty_wrapper(model: ThrombusSurrogate, model_cfg: dict, uncert
     should not be read as one; treat any calibration numbers produced via
     this path as a placeholder until `train.py` supports saving multiple
     independently trained seeds.
+
+    `model` (for `mc_dropout`) is expected to already be field-channels-only
+    (see `_FieldChannelsOnly`) if `model_cfg` has `predict_M_at_wall` set;
+    freshly-constructed `deep_ensemble` members are wrapped here directly
+    since `model_factory` builds them itself.
     """
 
     method = uncertainty_cfg["method"]
+    predict_M_at_wall = bool(model_cfg.get("predict_M_at_wall", False))
     if method == "deep_ensemble":
-        model_factory = lambda: ThrombusSurrogate(model_cfg).eval()
+        def model_factory():
+            member = ThrombusSurrogate(model_cfg).eval()
+            return _FieldChannelsOnly(member, n_field_channels) if predict_M_at_wall else member
+
         return DeepEnsemble(model_factory, n_members=uncertainty_cfg["n_ensemble_members"])
     if method == "mc_dropout":
         return MCDropoutWrapper(
@@ -122,6 +161,11 @@ def run_benchmark(
     model = ThrombusSurrogate(checkpoint["cfg"])
     model.load_state_dict(checkpoint["model_state"])
     model.eval()
+    predict_M_at_wall = bool(checkpoint["cfg"].get("predict_M_at_wall", False))
+    n_field_channels = checkpoint["cfg"]["output_channels"]
+    # See _FieldChannelsOnly: everything below except the M_at_wall/IoU step
+    # itself only knows about the original n_field_channels physical fields.
+    field_model = _FieldChannelsOnly(model, n_field_channels) if predict_M_at_wall else model
 
     train_ds = ThrombusSurrogateDataset(dataset_dir, "train")
     test_ds = ThrombusSurrogateDataset(dataset_dir, "test")
@@ -134,10 +178,32 @@ def run_benchmark(
 
     with torch.no_grad():
         t0 = time.perf_counter()
-        pred_fields = model(test_batch["params"])
+        raw_pred = model(test_batch["params"])
         neural_time_per_sample = (time.perf_counter() - t0) / len(test_ds)
+    pred_fields = raw_pred[:, :n_field_channels]
 
     accuracy = field_rmse(pred_fields.numpy(), test_batch["fields"].numpy(), mask=test_batch["fluid_mask"].numpy())
+
+    # Thrombosed-region mask IoU (Task 5.1's M_at_wall channel): only
+    # available if this checkpoint was trained with predict_M_at_wall.
+    thrombus_overlap = None
+    if predict_M_at_wall:
+        M_at_critical = physio_base["adhesion_aggregation"]["M_at_critical_plt_cm2"]
+        fibrin_critical = physio_base["fibrin"]["fibrin_critical_uM"]
+        fi_idx = FIELD_NAMES.index("conc_FI")
+
+        pred_M_at_wall = log_to_field(raw_pred[:, n_field_channels]).numpy()
+        true_M_at_wall = log_to_field(test_batch["M_at_wall"]).numpy()
+        pred_FI = log_to_field(pred_fields[:, fi_idx]).numpy()
+        true_FI = log_to_field(test_batch["fields"][:, fi_idx]).numpy()
+
+        pred_thrombus_mask = thrombus_mask(pred_M_at_wall, pred_FI, M_at_critical, fibrin_critical)
+        true_thrombus_mask = thrombus_mask(true_M_at_wall, true_FI, M_at_critical, fibrin_critical)
+        thrombus_overlap = {
+            "iou": thrombus_iou(pred_thrombus_mask, true_thrombus_mask),
+            "pred_thrombosed_fraction": float(pred_thrombus_mask.mean()),
+            "true_thrombosed_fraction": float(true_thrombus_mask.mean()),
+        }
 
     # Baseline comparison (Task 2.4): without these, there's no way to tell
     # whether the FNO is adding value over something trivial. Both are fit
@@ -162,7 +228,7 @@ def run_benchmark(
         },
         "FNO surrogate": {
             "test": accuracy,
-            "edge_holdout": _field_rmse_for(model, edge_holdout_batch),
+            "edge_holdout": _field_rmse_for(field_model, edge_holdout_batch),
         },
     }
 
@@ -183,9 +249,9 @@ def run_benchmark(
     neural_times = np.full(n_runtime, neural_time_per_sample)
     runtime = runtime_comparison(mech_times, neural_times)
 
-    edge_holdout_degradation = edge_holdout_eval_mod.evaluate_edge_holdout_degradation(model, test_ds, edge_holdout_ds)
+    edge_holdout_degradation = edge_holdout_eval_mod.evaluate_edge_holdout_degradation(field_model, test_ds, edge_holdout_ds)
 
-    uq_model = _build_uncertainty_wrapper(model, checkpoint["cfg"], training_cfg["model"]["uncertainty"])
+    uq_model = _build_uncertainty_wrapper(field_model, checkpoint["cfg"], training_cfg["model"]["uncertainty"], n_field_channels)
     with torch.no_grad():
         pred_mean, pred_var = uq_model.predict(test_batch["params"])
     reliability = calibration_mod.reliability_diagram_data(
@@ -204,14 +270,14 @@ def run_benchmark(
     plt.close(fig)
 
     _write_report(
-        output_dir, accuracy, runtime, edge_holdout_degradation, ece, model_comparison,
+        output_dir, accuracy, runtime, edge_holdout_degradation, ece, model_comparison, thrombus_overlap,
         n_test=len(test_ds), n_edge_holdout=len(edge_holdout_ds),
     )
 
 
 def _write_report(
     output_dir: str, accuracy: dict, runtime: dict, edge_holdout_degradation: dict, ece: float,
-    model_comparison: dict,
+    model_comparison: dict, thrombus_overlap: dict | None,
     n_test: int, n_edge_holdout: int,
 ) -> None:
     comparison_rows = [
@@ -272,6 +338,33 @@ def _write_report(
         "",
         f"Expected calibration error (predicted variance vs. observed squared error): {ece:.4f}.",
         "",
+        "## Thrombosed-region overlap (IoU)",
+        "",
+    ]
+    if thrombus_overlap is None:
+        lines += [
+            "Not computed for this checkpoint -- requires `model.predict_M_at_wall: true` "
+            "at training time (see `neural/model.py`'s docstring). Retrain with that flag "
+            "set to get this section.",
+            "",
+        ]
+    else:
+        lines += [
+            "| Metric | Value |",
+            "|---|---|",
+            f"| IoU (predicted vs. reference thrombosed mask) | {thrombus_overlap['iou']:.4f} |",
+            f"| Predicted thrombosed fraction (of raster cells) | {thrombus_overlap['pred_thrombosed_fraction']:.4f} |",
+            f"| Reference thrombosed fraction (of raster cells) | {thrombus_overlap['true_thrombosed_fraction']:.4f} |",
+            "",
+            "Thrombosed-region mask per `benchmark/metrics.thrombus_mask` (paper Sec. 2.6: "
+            "`M_at >= M_at_critical` OR `[FI] >= fibrin_critical`, evaluated per raster cell "
+            "using the predicted/reference `M_at_wall` and `conc_FI` fields). `[FI]` is "
+            'unreliable whenever a sample hit the concentration-cap safety clip (see README.md '
+            '"Known limitations"); if every test-split sample did, this IoU is effectively '
+            "driven by `M_at_wall` alone, not a genuine test of the fibrin threshold term.",
+            "",
+        ]
+    lines += [
         "---",
         "",
         "*Generated by `thrombus-benchmark` (`benchmark/run_benchmark.py`). "

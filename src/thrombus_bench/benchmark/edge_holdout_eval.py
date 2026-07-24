@@ -20,10 +20,10 @@ therefore measures whether the surrogate's accuracy degrades toward the
 edge of the sampled parameter range, which is a useful but limited signal:
 it is NOT a test of extrapolation beyond the simulator's own sampled
 behavior, and it says nothing about physiological realism. A genuine
-extrapolation split (parameters outside the sampled ranges entirely, or a
-distributionally different regime) would be needed to test true
-extrapolation -- that is a planned follow-up (see the project's Phase 3
-follow-up work), not something this module implements.
+extrapolation split (one parameter restricted to a sub-range during
+training, tested on the withheld remainder) is implemented separately --
+see `extrapolation_eval.py` and `data/sampler.
+sample_with_extrapolation_holdout`.
 """
 
 from __future__ import annotations

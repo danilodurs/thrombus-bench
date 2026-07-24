@@ -7,13 +7,19 @@ Standard supervised training loop over `data/dataset.py`
 `neural/model.py` `ThrombusSurrogate` against a combination of:
 
 * Data loss: MSE between predicted and mechanistic-solver ground-truth
-  field grids.
+  field grids -- plus `batch["M_at_wall"]` too, concatenated on as an extra
+  target channel, if `cfg["model"]["predict_M_at_wall"]` is set (see
+  `neural/model.py`'s docstring for this opt-in 12th output channel).
 * Physics losses: `neural/physics_losses.py` `total_physics_loss`
   (mass-conservation + non-negativity penalties), weighted per
   `configs/training.yaml` `physics_loss.weights`. Evaluated with
   `batch["fluid_mask"]` (`data/dataset.py`) so the exterior (non-fluid)
   raster cells don't dilute either penalty -- see `physics_losses.py`'s
-  "Fluid-domain masking" docstring section.
+  "Fluid-domain masking" docstring section. Only ever given the first
+  `cfg["model"]["output_channels"]` channels of `pred` (a no-op slice when
+  `predict_M_at_wall` is off) -- `M_at_wall` is a different physical
+  quantity/support region and isn't part of what these penalties reason
+  about.
 
 Hyperparameters (optimizer, LR schedule, epochs, batch size, early
 stopping) come from `configs/training.yaml` `optim`; only CSV logging is
@@ -53,6 +59,13 @@ def train(cfg: dict, dataset_dir: str, checkpoint_path: str, log_path: str) -> d
 
     physics_cfg = cfg["physics_loss"]
     weights = physics_cfg["weights"]
+    predict_M_at_wall = bool(cfg["model"].get("predict_M_at_wall", False))
+    n_field_channels = cfg["model"]["output_channels"]
+
+    def _target(batch: dict) -> torch.Tensor:
+        if predict_M_at_wall:
+            return torch.cat([batch["fields"], batch["M_at_wall"].unsqueeze(1)], dim=1)
+        return batch["fields"]
 
     os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
     log_rows = []
@@ -65,10 +78,12 @@ def train(cfg: dict, dataset_dir: str, checkpoint_path: str, log_path: str) -> d
         for batch in train_loader:
             optimizer.zero_grad()
             pred = model(batch["params"])
-            data_loss = torch.nn.functional.mse_loss(pred, batch["fields"])
+            data_loss = torch.nn.functional.mse_loss(pred, _target(batch))
             loss = weights["data"] * data_loss
             if physics_cfg["enabled"]:
-                phys = total_physics_loss(pred, weights, physics_cfg["residual_mode"], mask=batch["fluid_mask"])
+                phys = total_physics_loss(
+                    pred[:, :n_field_channels], weights, physics_cfg["residual_mode"], mask=batch["fluid_mask"]
+                )
                 for name, value in phys.items():
                     loss = loss + weights.get(name, 0.0) * value
             loss.backward()
@@ -83,7 +98,7 @@ def train(cfg: dict, dataset_dir: str, checkpoint_path: str, log_path: str) -> d
         with torch.no_grad():
             for batch in val_loader:
                 pred = model(batch["params"])
-                val_loss_sum += float(torch.nn.functional.mse_loss(pred, batch["fields"]))
+                val_loss_sum += float(torch.nn.functional.mse_loss(pred, _target(batch)))
                 n_val_batches += 1
         val_loss = val_loss_sum / max(1, n_val_batches)
 

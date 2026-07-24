@@ -41,8 +41,22 @@ class DeepEnsemble:
 
 
 def _enable_mc_dropout(model: nn.Module) -> None:
+    """Re-enable dropout layers after `model.eval()` for stochastic MC-dropout
+    sampling.
+
+    Checks `nn.Dropout`, `nn.Dropout2d`, and `nn.Dropout3d` explicitly --
+    `nn.Dropout2d`/`nn.Dropout3d` are NOT subclasses of `nn.Dropout` (all
+    three are siblings under the private `_DropoutNd` base), so
+    `isinstance(module, nn.Dropout)` alone silently never matches
+    `neural/model.py`'s `nn.Dropout2d` and this function was previously a
+    no-op: `MCDropoutWrapper.predict` would call `model.eval()` (disabling
+    dropout), then this (matching nothing), leaving dropout off for every
+    "stochastic" sample -- every sample identical, `pred_var` silently ~0
+    regardless of true model uncertainty.
+    """
+
     for module in model.modules():
-        if isinstance(module, nn.Dropout):
+        if isinstance(module, (nn.Dropout, nn.Dropout2d, nn.Dropout3d)):
             module.train()
 
 

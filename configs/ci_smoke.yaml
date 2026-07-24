@@ -39,6 +39,7 @@ model:
       n_message_passing_steps: 1
 
   output_channels: 11
+  predict_M_at_wall: false  # see neural/model.py's docstring
 
   uncertainty:
     method: mc_dropout

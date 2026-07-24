@@ -66,6 +66,12 @@ model:
   # conc_PT, conc_FG, conc_FI.
   output_channels: 11
 
+  # Opt-in 12th output channel predicting data/dataset.py's M_at_wall
+  # (rasterized surface_ode.SurfaceState.M_at, needed for
+  # benchmark/metrics.thrombus_mask/thrombus_iou) -- see neural/model.py's
+  # docstring. Default false so existing checkpoints/configs keep working.
+  predict_M_at_wall: false
+
   uncertainty:
     method: deep_ensemble    # "deep_ensemble" or "mc_dropout"
     n_ensemble_members: 3    # reduced from a typical 5-10 for demo-scale runtime

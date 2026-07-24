@@ -53,10 +53,26 @@ expose them as a `torch.utils.data.Dataset` yielding, per sample:
   physical quantity to log-compress or predict, just context for
   interpreting the other channels (e.g. masking the loss/metrics to
   in-domain cells only).
+* `M_at_wall`: shape-`(H, W)` float32 raster, a spatial representation of
+  `surface_ode.SurfaceState.M_at` (PLT/cm^2) rasterized into a narrow band
+  around the wall (`generate_dataset._rasterize_wall_band`; 0 elsewhere,
+  including in-domain fluid cells away from the wall -- `M_at` is a
+  *surface* density, not a bulk one). **Log-compressed** the same way as
+  `fields` (`field_to_log`, for the same reason: `M_at` spans a huge range
+  including exact zeros almost everywhere except the wall band) -- use
+  `log_to_field` to invert. Kept as its own key rather than a 12th `fields`
+  channel: different physical unit/support (surface density on a thin
+  band vs. bulk concentration/velocity over the whole domain) and a
+  different, much sparser statistic (mostly zeros) that would dilute a
+  shared per-channel loss/metric if stacked in.
 
 Train/val/test/edge-of-domain splits are read from the corresponding
 subdirectory written by `generate_dataset.py`
-(`sampler.split_train_val_test_edge_holdout`).
+(`sampler.split_train_val_test_edge_holdout`). An `"extrapolation"` split
+also exists as an opt-in alternative, written by `generate_dataset.
+generate_extrapolation_dataset` (`sampler.sample_with_extrapolation_holdout`)
+-- unlike edge-of-domain, genuinely never-seen-during-training parameter
+values for one chosen parameter; see `benchmark/extrapolation_eval.py`.
 """
 
 from __future__ import annotations
@@ -91,7 +107,7 @@ def log_to_field(x):
 
 
 class ThrombusSurrogateDataset(Dataset):
-    def __init__(self, dataset_dir: str, split: Literal["train", "val", "test", "edge_holdout"]):
+    def __init__(self, dataset_dir: str, split: Literal["train", "val", "test", "edge_holdout", "extrapolation"]):
         self.dataset_dir = dataset_dir
         self.split = split
         self.files = sorted(glob.glob(os.path.join(dataset_dir, split, "sample_*.npz")))
@@ -125,4 +141,5 @@ class ThrombusSurrogateDataset(Dataset):
                 [float(data[f"conc_{name}_max"]) for name in _SPECIES_NAMES], dtype=torch.float32
             ),
             "fluid_mask": torch.from_numpy(data["fluid_mask"].astype(np.float32)),
+            "M_at_wall": torch.from_numpy(field_to_log(data["M_at_wall"].astype(np.float32))),
         }

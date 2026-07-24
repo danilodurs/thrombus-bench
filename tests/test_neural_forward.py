@@ -46,3 +46,23 @@ def test_model_gradient_flows_to_all_parameters():
 def test_gnn_operator_core_not_implemented():
     with pytest.raises(NotImplementedError):
         build_operator_core({"type": "gnn", "gnn": {"hidden_channels": 8, "n_message_passing_steps": 2}}, out_channels=11)
+
+
+def test_predict_m_at_wall_defaults_to_false_and_output_channels_unchanged():
+    """Existing configs (no predict_M_at_wall key) must keep producing
+    exactly output_channels channels -- the opt-in 12th channel is off by
+    default so existing checkpoints/configs keep working."""
+
+    model = ThrombusSurrogate(_model_cfg())
+    assert model.predict_M_at_wall is False
+    out = model(torch.randn(3, 8))
+    assert out.shape == (3, 11, 16, 16)
+
+
+def test_predict_m_at_wall_true_adds_one_output_channel():
+    cfg = _model_cfg()
+    cfg["predict_M_at_wall"] = True
+    model = ThrombusSurrogate(cfg)
+    assert model.predict_M_at_wall is True
+    out = model(torch.randn(3, 8))
+    assert out.shape == (3, 12, 16, 16)

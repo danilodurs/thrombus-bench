@@ -36,6 +36,17 @@ For each parameter sample from `sampler.py`:
    per-sample QC signal beyond visual inspection; none of it is consumed by
    training/evaluation automatically -- see `data/dataset.py`'s docstring
    for how to read it back.
+
+   Also saved: `M_at_wall` (`grid_size`-shaped float32 raster, PLT/cm^2),
+   a spatial representation of `surface_ode.SurfaceState.M_at` -- the
+   "total amount of deposited activated platelets" and the most
+   thrombus-relevant quantity per the paper -- rasterized into a narrow
+   band around the wall (see `_rasterize_wall_band`; unlike `_rasterize`'s
+   whole-domain nearest-neighbor fill, since `M_at` is a *surface* density
+   only defined on wall DOFs, not a bulk field). This is what makes
+   `benchmark/metrics.thrombus_mask`/`thrombus_iou` usable against real
+   spatial output (previously only `max_M_at`/`thrombosed_fraction`
+   scalars were saved).
 5. Route each sample to train/val/test/edge_holdout per
    `sampler.split_train_val_test_edge_holdout`.
 
@@ -43,6 +54,17 @@ Scope note: runs serially (no multiprocessing) -- scikit-fem `Basis`/`Mesh`
 objects are not trivially picklable across a `multiprocessing.Pool`, and
 given this project's reduced-scale demo dataset (see README.md "Project
 status"), serial execution is fast enough in practice.
+
+Opt-in genuine-extrapolation variant
+--------------------------------------
+`generate_extrapolation_dataset` (CLI: `--extrapolation-param`) is a
+separate, opt-in mode -- not part of the default train/val/test/edge_holdout
+dataset above -- that restricts one parameter's train/val/test range to a
+sub-interval and draws a fourth "extrapolation" split from the withheld
+remainder, so a model trained on it has genuinely never seen that
+parameter's extrapolation range (unlike the edge-of-domain holdout, which
+is still drawn from the same sampled box). See `sampler.
+sample_with_extrapolation_holdout`'s docstring.
 """
 
 from __future__ import annotations
@@ -54,11 +76,18 @@ import numpy as np
 import yaml
 from matplotlib.tri import Triangulation
 from scipy.interpolate import griddata
+from scipy.spatial import cKDTree
 
 from thrombus_bench.mechanistic.coupled_solver import run_coupled_simulation
 from thrombus_bench.mechanistic.mesh import GeometryConfig, MeshConfig, build_aneurysm_mesh
 
-from .sampler import ParameterSpace, latin_hypercube_sample, split_train_val_test_edge_holdout
+from .sampler import (
+    DEFAULT_RANGES,
+    ParameterSpace,
+    latin_hypercube_sample,
+    sample_with_extrapolation_holdout,
+    split_train_val_test_edge_holdout,
+)
 
 _ALL_SPECIES = ("RP", "AP", "APR", "APS", "T", "AT", "PT", "FG", "FI")
 PARAM_ORDER = (
@@ -109,6 +138,50 @@ def _fluid_mask(node_coords: np.ndarray, triangles: np.ndarray, grid_size: tuple
     return (membership >= 0).astype(np.float32).reshape(grid_size)
 
 
+def _rasterize_wall_band(
+    node_coords: np.ndarray,
+    wall_node_coords: np.ndarray,
+    wall_values: np.ndarray,
+    grid_size: tuple[int, int],
+    band_width_cells: float = 1.5,
+) -> np.ndarray:
+    """Rasterize a wall-only nodal field (e.g. `surface_ode.SurfaceState.M_at`,
+    defined only on wall DOFs -- unlike the bulk species fields `_rasterize`
+    handles) into a narrow band around the wall, on the same fixed
+    bounding-box grid as `_rasterize`/`_fluid_mask`.
+
+    Deliberately NOT a nearest-neighbor fill of the whole domain (that
+    would smear a *surface* density across the entire fluid interior,
+    which `_rasterize` is fine with for bulk concentrations but would be
+    physically wrong here). Instead: for every grid cell, find the nearest
+    wall node (`scipy.spatial.cKDTree`) and assign its value only if within
+    `band_width_cells` grid cells of the wall; all other cells are 0.
+
+    The threshold is expressed in grid cells (`band_width_cells *
+    min(dx, dy)`, using the *finer* of the grid's two axis spacings) rather
+    than a fixed physical length, so the band stays a similarly-narrow
+    number of cells thick regardless of `grid_size` or how elongated the
+    domain's bounding box is (this domain is a long, thin vessel, so
+    `dx` and `dy` can differ substantially -- using the coarser axis would
+    make the band unnecessarily thick along the finer one).
+    """
+
+    xmin, ymin = node_coords.min(axis=1)
+    xmax, ymax = node_coords.max(axis=1)
+    gx, gy = np.meshgrid(np.linspace(xmin, xmax, grid_size[1]), np.linspace(ymin, ymax, grid_size[0]))
+    grid_points = np.column_stack([gx.ravel(), gy.ravel()])
+
+    dx = (xmax - xmin) / max(grid_size[1] - 1, 1)
+    dy = (ymax - ymin) / max(grid_size[0] - 1, 1)
+    threshold = band_width_cells * min(dx, dy)
+
+    tree = cKDTree(wall_node_coords.T)
+    distances, nearest_idx = tree.query(grid_points)
+
+    raster = np.where(distances <= threshold, wall_values[nearest_idx], 0.0)
+    return raster.reshape(grid_size).astype(np.float32)
+
+
 def _run_one_sample(sample: dict, physio_base: dict, mesh_cfg: dict, end_time_s: float, dt_s: float, grid_size: tuple[int, int]) -> dict:
     geom = GeometryConfig(
         vessel_diameter_mm=sample["vessel_diameter_mm"],
@@ -144,6 +217,8 @@ def _run_one_sample(sample: dict, physio_base: dict, mesh_cfg: dict, end_time_s:
         "velocity_y": _rasterize(node_coords, uy, grid_size),
     }
     fluid_mask = _fluid_mask(node_coords, tagged_mesh.mesh.t, grid_size)
+    wall_node_coords = history.basis_c.doflocs[:, final.wall_dofs]
+    M_at_wall = _rasterize_wall_band(node_coords, wall_node_coords, final.surface.M_at, grid_size)
     conc_min_max = {}
     for name in _ALL_SPECIES:
         nodal = final.concentrations[name][:n_vertices]
@@ -170,6 +245,7 @@ def _run_one_sample(sample: dict, physio_base: dict, mesh_cfg: dict, end_time_s:
         "flow_residual": float(final.flow.residual),
         "thrombin_fibrin_reliable": bool(history.thrombin_fibrin_reliable),
         "fluid_mask": fluid_mask,
+        "M_at_wall": M_at_wall,
         **clip_counts,
         **conc_min_max,
         **fields,
@@ -199,6 +275,36 @@ def _update_qc_summary(qc: dict, result: dict) -> None:
             qc["n_samples_clip_hit"][name] += 1
 
 
+def _generate_from_splits(
+    splits: dict[str, list[dict]],
+    physio_base: dict,
+    geometry_mesh_cfg: dict,
+    output_dir: str,
+    end_time_s: float,
+    dt_s: float,
+    grid_size: tuple[int, int],
+) -> tuple[dict[str, int], dict]:
+    """Shared by `generate_dataset` and `generate_extrapolation_dataset`:
+    batch-run the mechanistic solver over every sample in `splits` (a
+    `{split_name: [sample, ...]}` dict, from either
+    `sampler.split_train_val_test_edge_holdout` or
+    `sampler.sample_with_extrapolation_holdout`), writing results under
+    `output_dir/{split_name}/`. Returns `(counts, qc_summary)` -- see
+    `generate_dataset`'s docstring."""
+
+    counts = {}
+    qc_summary = _new_qc_summary()
+    for split_name, split_samples in splits.items():
+        split_dir = os.path.join(output_dir, split_name)
+        os.makedirs(split_dir, exist_ok=True)
+        for i, sample in enumerate(split_samples):
+            result = _run_one_sample(sample, physio_base, geometry_mesh_cfg, end_time_s, dt_s, grid_size)
+            np.savez(os.path.join(split_dir, f"sample_{i:04d}.npz"), **result)
+            _update_qc_summary(qc_summary, result)
+        counts[split_name] = len(split_samples)
+    return counts, qc_summary
+
+
 def generate_dataset(
     config: dict,
     physio_base: dict,
@@ -225,18 +331,50 @@ def generate_dataset(
         n_edge_holdout=config["n_edge_holdout"],
         seed=config.get("seed", 0),
     )
+    return _generate_from_splits(splits, physio_base, geometry_mesh_cfg, output_dir, end_time_s, dt_s, grid_size)
 
-    counts = {}
-    qc_summary = _new_qc_summary()
-    for split_name, split_samples in splits.items():
-        split_dir = os.path.join(output_dir, split_name)
-        os.makedirs(split_dir, exist_ok=True)
-        for i, sample in enumerate(split_samples):
-            result = _run_one_sample(sample, physio_base, geometry_mesh_cfg, end_time_s, dt_s, grid_size)
-            np.savez(os.path.join(split_dir, f"sample_{i:04d}.npz"), **result)
-            _update_qc_summary(qc_summary, result)
-        counts[split_name] = len(split_samples)
-    return counts, qc_summary
+
+# Split point for generate_extrapolation_dataset's default --extrapolation-param
+# choices: fraction of the parameter's full sampler.DEFAULT_RANGES span
+# routed to train/val/test (the remainder, upper end, is the withheld
+# "extrapolation" range) -- see generate_extrapolation_dataset's docstring.
+DEFAULT_EXTRAPOLATION_TRAIN_FRACTION = 0.7
+
+
+def generate_extrapolation_dataset(
+    config: dict,
+    physio_base: dict,
+    geometry_mesh_cfg: dict,
+    output_dir: str,
+    extrapolate_param: str,
+    train_range: tuple[float, float],
+    extrapolate_range: tuple[float, float],
+    n_extrapolate: int,
+    end_time_s: float = 1.0,
+    dt_s: float = 0.1,
+    grid_size: tuple[int, int] = (32, 32),
+) -> tuple[dict[str, int], dict]:
+    """Opt-in, genuinely-extrapolative counterpart to `generate_dataset`
+    (see `sampler.sample_with_extrapolation_holdout`'s docstring for how
+    this differs from the default edge-of-domain holdout): train/val/test
+    are drawn with `extrapolate_param` restricted to `train_range` (all
+    other parameters from their full `sampler.DEFAULT_RANGES`, as usual);
+    a fourth "extrapolation" split is drawn with `extrapolate_param`
+    restricted to the withheld `extrapolate_range` instead. Writes results
+    under `output_dir/{train,val,test,extrapolation}/`; same return value
+    and per-sample QC fields as `generate_dataset`.
+
+    `config` supplies `n_train`/`n_val`/`n_test` (same keys as
+    `generate_dataset`'s `config` -- `n_edge_holdout`/`edge_holdout_quantile`
+    are not used here)."""
+
+    space = ParameterSpace()
+    splits = sample_with_extrapolation_holdout(
+        space, extrapolate_param, train_range, extrapolate_range,
+        n_train=config["n_train"], n_val=config["n_val"], n_test=config["n_test"],
+        n_extrapolate=n_extrapolate, seed=config.get("seed", 0),
+    )
+    return _generate_from_splits(splits, physio_base, geometry_mesh_cfg, output_dir, end_time_s, dt_s, grid_size)
 
 
 def main() -> None:
@@ -244,11 +382,26 @@ def main() -> None:
     parser.add_argument("--training-config", type=str, default="configs/demo_cpu.yaml")
     parser.add_argument("--physio-config", type=str, default="configs/physio_params.yaml")
     parser.add_argument("--geometry-config", type=str, default="configs/geometry.yaml")
-    parser.add_argument("--output-dir", type=str, default="data/processed")
+    parser.add_argument("--output-dir", type=str, default=None, help="Default: data/processed, or data/processed_extrap_{param} if --extrapolation-param is given.")
     parser.add_argument("--end-time-s", type=float, default=1.0)
     parser.add_argument("--dt-s", type=float, default=0.1)
     parser.add_argument("--target-num-elements", type=int, default=800)
     parser.add_argument("--grid-size", type=int, default=32)
+    parser.add_argument(
+        "--extrapolation-param", type=str, default=None, choices=["heparin_conc_uM"],
+        help="Opt-in: generate a genuinely-extrapolative split for this parameter instead of the "
+        "default edge-of-domain-holdout dataset -- see generate_extrapolation_dataset's docstring.",
+    )
+    parser.add_argument(
+        "--extrapolation-split-fraction", type=float, default=DEFAULT_EXTRAPOLATION_TRAIN_FRACTION,
+        help="Only used with --extrapolation-param: fraction of that parameter's full "
+        "sampler.DEFAULT_RANGES span routed to train/val/test (lower end); the remainder "
+        "(upper end) is the withheld extrapolation range.",
+    )
+    parser.add_argument(
+        "--n-extrapolate", type=int, default=6,
+        help="Only used with --extrapolation-param: number of samples in the extrapolation split.",
+    )
     args = parser.parse_args()
 
     with open(args.training_config) as f:
@@ -260,11 +413,28 @@ def main() -> None:
     mesh_cfg = dict(geometry_yaml["mesh"])
     mesh_cfg["target_num_elements"] = args.target_num_elements
 
-    counts, qc = generate_dataset(
-        training_cfg["data"], physio_base, mesh_cfg, args.output_dir,
-        end_time_s=args.end_time_s, dt_s=args.dt_s, grid_size=(args.grid_size, args.grid_size),
-    )
-    print(f"Wrote dataset to {args.output_dir}: {counts}")
+    if args.extrapolation_param:
+        output_dir = args.output_dir or f"data/processed_extrap_{args.extrapolation_param.removesuffix('_uM').removesuffix('_conc')}"
+        lo, hi = DEFAULT_RANGES[args.extrapolation_param]
+        split_point = lo + args.extrapolation_split_fraction * (hi - lo)
+        train_range, extrapolate_range = (lo, split_point), (split_point, hi)
+        counts, qc = generate_extrapolation_dataset(
+            training_cfg["data"], physio_base, mesh_cfg, output_dir,
+            extrapolate_param=args.extrapolation_param, train_range=train_range, extrapolate_range=extrapolate_range,
+            n_extrapolate=args.n_extrapolate,
+            end_time_s=args.end_time_s, dt_s=args.dt_s, grid_size=(args.grid_size, args.grid_size),
+        )
+        print(
+            f"Wrote extrapolation dataset ({args.extrapolation_param}: train/val/test in "
+            f"{train_range}, extrapolation in {extrapolate_range}) to {output_dir}: {counts}"
+        )
+    else:
+        output_dir = args.output_dir or "data/processed"
+        counts, qc = generate_dataset(
+            training_cfg["data"], physio_base, mesh_cfg, output_dir,
+            end_time_s=args.end_time_s, dt_s=args.dt_s, grid_size=(args.grid_size, args.grid_size),
+        )
+        print(f"Wrote dataset to {output_dir}: {counts}")
     _print_qc_summary(qc)
 
 

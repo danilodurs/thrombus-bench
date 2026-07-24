@@ -22,6 +22,17 @@ sample whose parameters fall in the outer `(1 - edge_holdout_quantile)` tail
 (by Euclidean distance in normalized parameter space from the
 sampled-population center) is routed to this holdout set instead of
 train/val/test, per `configs/training.yaml` `data.edge_holdout_quantile`.
+
+`sample_with_extrapolation_holdout` is a genuinely different, separate
+evaluation split: rather than carving edge samples out of the *same*
+sampled box, it restricts ONE parameter's *training* range to a
+caller-chosen sub-interval (e.g. the lower 70% of its current range) and
+draws a separate "extrapolation" split with that parameter restricted to
+the *withheld* remainder -- a model trained only on the training
+sub-interval has never seen that withheld region during training, unlike
+the edge-of-domain holdout (see `data/generate_dataset.py`'s
+`generate_extrapolation_dataset`, an opt-in variant of the default dataset
+generation).
 """
 
 from __future__ import annotations
@@ -157,4 +168,67 @@ def split_train_val_test_edge_holdout(
         "val": [samples[i] for i in val_idx],
         "test": [samples[i] for i in test_idx],
         "edge_holdout": [samples[i] for i in edge_holdout_idx],
+    }
+
+
+def sample_with_extrapolation_holdout(
+    space: ParameterSpace,
+    extrapolate_param: str,
+    train_range: tuple[float, float],
+    extrapolate_range: tuple[float, float],
+    n_train: int,
+    n_val: int,
+    n_test: int,
+    n_extrapolate: int,
+    seed: int = 0,
+) -> dict[str, list[dict]]:
+    """Genuine-extrapolation split (see module docstring): draw train/val/test
+    samples with `extrapolate_param` restricted to `train_range` (all other
+    parameters drawn from `space`'s full ranges, as usual), plus a separate
+    "extrapolation" split with `extrapolate_param` restricted to
+    `extrapolate_range` instead (other parameters again from their full
+    ranges) -- a model trained only on `train_range` has never seen
+    `extrapolate_range` during training, unlike `split_train_val_test_edge_holdout`'s
+    same-box edge samples.
+
+    `train_range`/`extrapolate_range` must not overlap (raises `ValueError`
+    otherwise) -- this function doesn't pick the split point itself; that's
+    a caller decision (see `data/generate_dataset.py`'s
+    `generate_extrapolation_dataset` for the current heparin_conc_uM choice
+    and its rationale).
+
+    train/val/test are drawn as one `n_train+n_val+n_test`-sample LHS batch
+    from the restricted-range space and split via a fixed random shuffle
+    (mirroring `split_train_val_test_edge_holdout`'s train/val/test
+    assignment, minus its edge-of-domain distance scoring, which doesn't
+    apply here); the extrapolation split is drawn as an independent
+    `n_extrapolate`-sample LHS batch (seed+1, so it isn't correlated with
+    the train/val/test draw) from the extrapolate-range space.
+    """
+
+    if extrapolate_param not in space.ranges:
+        raise ValueError(f"{extrapolate_param!r} is not in space.ranges: {list(space.ranges)}")
+    lo1, hi1 = train_range
+    lo2, hi2 = extrapolate_range
+    if not (hi1 <= lo2 or hi2 <= lo1):  # intervals overlap unless one ends before the other starts
+        raise ValueError(f"train_range {train_range} and extrapolate_range {extrapolate_range} overlap for {extrapolate_param!r}")
+
+    train_space = ParameterSpace(ranges={**space.ranges, extrapolate_param: train_range})
+    extrapolate_space = ParameterSpace(ranges={**space.ranges, extrapolate_param: extrapolate_range})
+
+    n_in_range = n_train + n_val + n_test
+    in_range_samples = latin_hypercube_sample(train_space, n_in_range, seed=seed)
+    extrapolate_samples = latin_hypercube_sample(extrapolate_space, n_extrapolate, seed=seed + 1)
+
+    rng = np.random.default_rng(seed)
+    shuffled = rng.permutation(n_in_range)
+    train_idx = shuffled[:n_train]
+    val_idx = shuffled[n_train : n_train + n_val]
+    test_idx = shuffled[n_train + n_val : n_train + n_val + n_test]
+
+    return {
+        "train": [in_range_samples[i] for i in train_idx],
+        "val": [in_range_samples[i] for i in val_idx],
+        "test": [in_range_samples[i] for i in test_idx],
+        "extrapolation": extrapolate_samples,
     }

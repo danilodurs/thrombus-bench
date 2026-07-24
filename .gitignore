@@ -19,6 +19,8 @@ data/*.h5
 data/*.npz
 data/raw/
 data/processed/
+data/processed_extrap_*/
+data/processed_pilot/
 checkpoints/
 *.ckpt
 *.pt
