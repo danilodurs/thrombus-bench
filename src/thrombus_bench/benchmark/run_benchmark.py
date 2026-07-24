@@ -7,15 +7,21 @@ End-to-end benchmark entrypoint:
 1. Load the trained neural surrogate (`neural/model.py`, from a checkpoint
    written by `neural/train.py`) and run it on `data/dataset.py`
    `split="test"` and `split="edge_holdout"`.
-2. Compute `benchmark/metrics.py` accuracy metrics (field RMSE, max-M_at and
-   thrombosed-fraction summary errors), `benchmark/edge_holdout_eval.py`
+2. Compute `benchmark/metrics.py` accuracy metrics (field RMSE -- both
+   all-cells and fluid-only via `data/dataset.py`'s `fluid_mask`, max-M_at
+   and thrombosed-fraction summary errors), `benchmark/edge_holdout_eval.py`
    edge-of-domain degradation, `benchmark/calibration.py` UQ calibration
    (MC-dropout or deep-ensemble, per `configs/training.yaml`
    `model.uncertainty.method` -- see `_build_uncertainty_wrapper`'s
    docstring for the deep-ensemble path's known limitation), and a runtime
    comparison (neural forward-pass time vs. a freshly re-timed mechanistic
    solve on a handful of test-set parameter vectors).
-3. Render plots via `viz/plots.py` and assemble a single Markdown + PNG
+3. Fit `neural/baselines.py`'s `MeanFieldBaseline`/`NearestNeighborBaseline`
+   on the train split and compute the same field RMSE (all-cells and
+   fluid-only) for them alongside the FNO surrogate, on both the test and
+   edge-holdout splits -- without this, there's no way to tell whether the
+   FNO is adding value over something trivial.
+4. Render plots via `viz/plots.py` and assemble a single Markdown + PNG
    bundle at `results/report.md`.
 """
 
@@ -37,16 +43,23 @@ from torch.utils.data import DataLoader
 from ..data.dataset import ThrombusSurrogateDataset
 from ..mechanistic.coupled_solver import run_coupled_simulation
 from ..mechanistic.mesh import GeometryConfig, build_aneurysm_mesh
+from ..neural.baselines import MeanFieldBaseline, NearestNeighborBaseline
 from ..neural.model import ThrombusSurrogate
 from ..neural.uncertainty import DeepEnsemble, MCDropoutWrapper
 from . import calibration as calibration_mod
 from . import edge_holdout_eval as edge_holdout_eval_mod
 from .metrics import field_rmse, runtime_comparison
 from ..data.generate_dataset import PARAM_ORDER
+from ..data.sampler import ParameterSpace, denormalize_params
 from ..viz import plots as plots_mod
 
 
 def _time_mechanistic_solve(params_row: np.ndarray, physio_base: dict, mesh_cfg: dict, end_time_s: float, dt_s: float) -> float:
+    """`params_row` must be in physical units (`data/sampler.denormalize_params`'d
+    back out of `data/dataset.py`'s [-1, 1]-normalized `params`) -- this
+    rebuilds the actual mesh/physio for a re-timed mechanistic solve, not a
+    model input."""
+
     sample = dict(zip(PARAM_ORDER, params_row))
     geom = GeometryConfig(
         vessel_diameter_mm=float(sample["vessel_diameter_mm"]),
@@ -110,24 +123,62 @@ def run_benchmark(
     model.load_state_dict(checkpoint["model_state"])
     model.eval()
 
+    train_ds = ThrombusSurrogateDataset(dataset_dir, "train")
     test_ds = ThrombusSurrogateDataset(dataset_dir, "test")
     edge_holdout_ds = ThrombusSurrogateDataset(dataset_dir, "edge_holdout")
 
     test_loader = DataLoader(test_ds, batch_size=len(test_ds))
     test_batch = next(iter(test_loader))
+    edge_holdout_loader = DataLoader(edge_holdout_ds, batch_size=len(edge_holdout_ds))
+    edge_holdout_batch = next(iter(edge_holdout_loader))
+
     with torch.no_grad():
         t0 = time.perf_counter()
         pred_fields = model(test_batch["params"])
         neural_time_per_sample = (time.perf_counter() - t0) / len(test_ds)
 
-    accuracy = field_rmse(pred_fields.numpy(), test_batch["fields"].numpy())
+    accuracy = field_rmse(pred_fields.numpy(), test_batch["fields"].numpy(), mask=test_batch["fluid_mask"].numpy())
+
+    # Baseline comparison (Task 2.4): without these, there's no way to tell
+    # whether the FNO is adding value over something trivial. Both are fit
+    # on the train split only, then evaluated with the same field_rmse
+    # (masked + unmasked) as the FNO, on both test and edge-holdout.
+    mean_field_baseline = MeanFieldBaseline().fit(train_ds).eval()
+    nearest_neighbor_baseline = NearestNeighborBaseline().fit(train_ds).eval()
+
+    def _field_rmse_for(candidate_model, batch: dict) -> dict:
+        with torch.no_grad():
+            pred = candidate_model(batch["params"])
+        return field_rmse(pred.numpy(), batch["fields"].numpy(), mask=batch["fluid_mask"].numpy())
+
+    model_comparison = {
+        "Mean-field baseline": {
+            "test": _field_rmse_for(mean_field_baseline, test_batch),
+            "edge_holdout": _field_rmse_for(mean_field_baseline, edge_holdout_batch),
+        },
+        "Nearest-neighbor baseline": {
+            "test": _field_rmse_for(nearest_neighbor_baseline, test_batch),
+            "edge_holdout": _field_rmse_for(nearest_neighbor_baseline, edge_holdout_batch),
+        },
+        "FNO surrogate": {
+            "test": accuracy,
+            "edge_holdout": _field_rmse_for(model, edge_holdout_batch),
+        },
+    }
 
     # Runtime comparison: re-time the mechanistic solver on a few test-set
     # parameter vectors (short window, matching generate_dataset.py's
     # scope), vs. the neural forward pass just timed above.
     n_runtime = min(n_runtime_samples, len(test_ds))
+    param_space = ParameterSpace()
     mech_times = np.array(
-        [_time_mechanistic_solve(test_batch["params"][i].numpy(), physio_base, mesh_cfg, mechanistic_end_time_s, mechanistic_dt_s) for i in range(n_runtime)]
+        [
+            _time_mechanistic_solve(
+                denormalize_params(test_batch["params"][i].numpy(), param_space),
+                physio_base, mesh_cfg, mechanistic_end_time_s, mechanistic_dt_s,
+            )
+            for i in range(n_runtime)
+        ]
     )
     neural_times = np.full(n_runtime, neural_time_per_sample)
     runtime = runtime_comparison(mech_times, neural_times)
@@ -153,15 +204,22 @@ def run_benchmark(
     plt.close(fig)
 
     _write_report(
-        output_dir, accuracy, runtime, edge_holdout_degradation, ece,
+        output_dir, accuracy, runtime, edge_holdout_degradation, ece, model_comparison,
         n_test=len(test_ds), n_edge_holdout=len(edge_holdout_ds),
     )
 
 
 def _write_report(
     output_dir: str, accuracy: dict, runtime: dict, edge_holdout_degradation: dict, ece: float,
+    model_comparison: dict,
     n_test: int, n_edge_holdout: int,
 ) -> None:
+    comparison_rows = [
+        f"| {name} | {m['test']['overall']:.4f} | {m['test']['fluid_only']:.4f} | "
+        f"{m['edge_holdout']['overall']:.4f} | {m['edge_holdout']['fluid_only']:.4f} |"
+        for name, m in model_comparison.items()
+    ]
+
     lines = [
         "# thrombus-bench benchmark report",
         "",
@@ -171,7 +229,26 @@ def _write_report(
         "",
         "| Metric | Value |",
         "|---|---|",
-        f"| Overall field RMSE (log-space) | {accuracy['overall']:.4f} |",
+        f"| Overall field RMSE (log-space, all cells) | {accuracy['overall']:.4f} |",
+        f"| Overall field RMSE (log-space, fluid cells only) | {accuracy['fluid_only']:.4f} |",
+        "",
+        "Fluid-only excludes the rasterization bounding box's exterior "
+        "(non-fluid) cells -- see `data/generate_dataset._fluid_mask` -- so "
+        "it isn't inflated by easy, mostly-constant background reconstruction; "
+        "the all-cells number is kept alongside it for comparison.",
+        "",
+        "## Model comparison (field RMSE, log-space)",
+        "",
+        "| Model | Test (all cells) | Test (fluid only) | Edge holdout (all cells) | Edge holdout (fluid only) |",
+        "|---|---|---|---|---|",
+        *comparison_rows,
+        "",
+        "`Mean-field baseline`/`Nearest-neighbor baseline` (`neural/baselines.py`) "
+        "are trivial predictors fit on the train split only -- a constant "
+        "(per-pixel training mean) and a lookup table (nearest training "
+        "sample by normalized parameter distance), respectively -- included "
+        "so the FNO surrogate's numbers above can be judged against a floor "
+        "rather than in isolation.",
         "",
         "## Runtime",
         "",
@@ -209,7 +286,7 @@ def _write_report(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--training-config", type=str, default="configs/training.yaml")
+    parser.add_argument("--training-config", type=str, default="configs/demo_cpu.yaml")
     parser.add_argument("--physio-config", type=str, default="configs/physio_params.yaml")
     parser.add_argument("--geometry-config", type=str, default="configs/geometry.yaml")
     parser.add_argument("--checkpoint", type=str, default="checkpoints/model.pt")

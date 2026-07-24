@@ -68,6 +68,57 @@ def test_field_rmse_known_constant_offset():
     assert np.allclose(result["per_channel"], 2.0)
 
 
+def test_field_rmse_without_mask_leaves_fluid_only_none():
+    """Default mask=None must keep existing behavior identical -- no
+    "fluid_only" computation, just the two pre-existing keys populated."""
+
+    fields = np.random.default_rng(0).normal(size=(2, 3, 4, 4))
+    result = field_rmse(fields, fields)
+    assert result["fluid_only"] is None
+    assert result["per_channel_fluid_only"] is None
+
+
+def test_field_rmse_masked_ignores_exterior_error_4d():
+    """Construct a batch where the exterior (mask=0) region has a huge
+    error and the fluid (mask=1) region has none -- the fluid-only RMSE
+    must be exactly 0, while the all-cells RMSE is dominated by the
+    exterior error."""
+
+    true = np.zeros((2, 3, 4, 4))
+    pred = np.zeros((2, 3, 4, 4))
+    mask = np.ones((2, 4, 4))
+    mask[:, 0, 0] = 0.0  # one exterior cell per sample
+    pred[:, :, 0, 0] = 1000.0  # huge error, but only in the exterior cell
+
+    result = field_rmse(pred, true, mask=mask)
+
+    assert result["fluid_only"] == pytest.approx(0.0, abs=1e-9)
+    assert np.allclose(result["per_channel_fluid_only"], 0.0, atol=1e-9)
+    assert result["overall"] > 100.0  # dominated by the exterior error
+
+
+def test_field_rmse_masked_matches_hand_computation_3d():
+    true = np.zeros((2, 2, 2))
+    pred = np.array(
+        [
+            [[1.0, 2.0], [0.0, 0.0]],  # channel 0: errors 1,2 at fluid cells; 0 at exterior
+            [[0.0, 0.0], [3.0, 100.0]],  # channel 1: exterior cell (row1,col1) has a huge error
+        ]
+    )
+    mask = np.array([[1.0, 1.0], [1.0, 0.0]])  # bottom-right cell is exterior
+
+    result = field_rmse(pred, true, mask=mask)
+
+    # Fluid cells (3 of them, shared across channels): channel 0 errors
+    # [1,2,0]^2 -> mean 5/3; channel 1 errors [0,0,3]^2 -> mean 3.
+    expected_per_channel = np.sqrt([5.0 / 3.0, 3.0])
+    np.testing.assert_allclose(result["per_channel_fluid_only"], expected_per_channel, rtol=1e-6)
+
+    expected_overall = np.sqrt((1.0 + 4.0 + 0.0 + 0.0 + 0.0 + 9.0) / 6.0)
+    assert result["fluid_only"] == pytest.approx(expected_overall, rel=1e-6)
+    assert result["overall"] > result["fluid_only"]  # the 100.0 exterior error inflates it
+
+
 def test_max_M_at_relative_error():
     pred = np.array([1.1e7, 2.0e7])
     true = np.array([1.0e7, 2.0e7])

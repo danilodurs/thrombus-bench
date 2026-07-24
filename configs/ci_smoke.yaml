@@ -1,0 +1,71 @@
+# Minimal training config for the CI "does the pipeline still run" smoke
+# test (.github/workflows/ci.yml) -- NOT a real training run. Every size
+# here is picked to make thrombus-generate-dataset -> thrombus-train ->
+# thrombus-benchmark finish in well under a minute on CPU: 4 total samples
+# (2 train / 1 val / 1 test / 1 edge_holdout -- the minimum
+# data/sampler.split_train_val_test_edge_holdout can split without
+# raising), 1 training epoch, a tiny 8x8 encoder/rasterization grid (must
+# stay in sync with the --grid-size flag passed to thrombus-generate-dataset
+# in ci.yml -- see configs/demo_cpu.yaml's model.encoder docstring for why),
+# and a single MC-dropout sample for the calibration step. See
+# configs/demo_cpu.yaml for what each key means; only the *values* below
+# are CI-specific.
+
+seed: 0
+
+data:
+  dataset_dir: data/processed
+  n_train: 2
+  n_val: 1
+  n_test: 1
+  n_edge_holdout: 1
+  edge_holdout_quantile: 0.9
+
+model:
+  encoder:
+    param_dim: 8
+    latent_grid_size: [8, 8]
+    hidden_channels: 4
+    n_layers: 1
+
+  operator_core:
+    type: fno
+    fno:
+      modes: 2
+      hidden_channels: 4
+      n_layers: 1
+    gnn:
+      hidden_channels: 4
+      n_message_passing_steps: 1
+
+  output_channels: 11
+
+  uncertainty:
+    method: mc_dropout
+    n_ensemble_members: 2
+    mc_dropout_rate: 0.1
+    mc_dropout_n_samples: 2
+
+physics_loss:
+  enabled: true
+  residual_mode: finite_difference
+  weights:
+    data: 1.0
+    mass_conservation: 0.05
+    nonnegativity: 0.1
+
+optim:
+  epochs: 1
+  batch_size: 2
+  lr: 3.0e-4
+  weight_decay: 1.0e-5
+  optimizer: adamw
+  lr_schedule: cosine
+  grad_clip_norm: 1.0
+  early_stopping_patience: 20
+
+logging:
+  backend: csv
+  log_dir: runs/
+  checkpoint_dir: checkpoints/
+  log_every_n_steps: 10

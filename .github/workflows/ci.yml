@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # Installed before `pip install -e .` (opposite order from the
+      # README's two-line snippet) so pip never resolves/downloads the
+      # default (CUDA-bundled, much larger) torch wheel first only to
+      # replace it a moment later -- installing the CPU wheel up front
+      # means `torch>=2.2` in pyproject.toml is already satisfied by the
+      # time `pip install -e .` runs.
+      - name: Install CPU-only torch
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install package
+        run: pip install -e .
+
+      - name: Run test suite
+        run: pytest -q
+
+      # Minimal end-to-end smoke test: does the full pipeline still run?
+      # (Not a real benchmark -- see configs/ci_smoke.yaml's header comment
+      # for why every size here is tiny: 4 total samples, 1 training epoch,
+      # an 8x8 grid.) Measured locally: ~2s generate-dataset + ~4s train +
+      # ~2s benchmark, well inside the CI time budget.
+      - name: Smoke test - generate dataset
+        run: >
+          thrombus-generate-dataset
+          --training-config configs/ci_smoke.yaml
+          --output-dir /tmp/ci_smoke/data
+          --end-time-s 0.2 --dt-s 0.1
+          --target-num-elements 100
+          --grid-size 8
+
+      - name: Smoke test - train
+        run: >
+          thrombus-train
+          --config configs/ci_smoke.yaml
+          --dataset-dir /tmp/ci_smoke/data
+          --checkpoint /tmp/ci_smoke/model.pt
+          --log /tmp/ci_smoke/train_log.csv
+
+      - name: Smoke test - benchmark
+        run: >
+          thrombus-benchmark
+          --training-config configs/ci_smoke.yaml
+          --checkpoint /tmp/ci_smoke/model.pt
+          --dataset-dir /tmp/ci_smoke/data
+          --output-dir /tmp/ci_smoke/results
+          --target-num-elements 100
+
+      - name: Assert benchmark report was created
+        run: |
+          test -s /tmp/ci_smoke/results/report.md
+          cat /tmp/ci_smoke/results/report.md

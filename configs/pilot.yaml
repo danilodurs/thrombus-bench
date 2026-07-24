@@ -1,0 +1,136 @@
+# PILOT-SCALE CONFIG -- sized to actually produce a meaningful (if still
+# CPU-modest) benchmark result, unlike configs/demo_cpu.yaml (24/6/6/6
+# samples, 40 epochs), which only smoke-tests that the pipeline runs.
+# Still well below the paper's original full scope (README.md "Scale
+# caveat" mentions O(100-1000) samples, e.g. n_train: 700) -- this is a
+# middle "pilot" tier: enough samples for the edge-of-domain holdout split
+# and summary-scalar errors to mean something, while staying a
+# single-machine, no-GPU, "run it and come back in ~15 minutes" job rather
+# than a multi-hour/cluster job.
+#
+# Sizing rationale (measured on one CPU dev machine; scale expectations to
+# your own hardware, not these exact minutes):
+# - `thrombus-generate-dataset` at configs/demo_cpu.yaml's defaults (mesh
+#   target_num_elements=800, end_time_s=1.0, dt_s=0.1, grid_size=32) took
+#   ~67s for 42 samples, i.e. ~1.6 s/sample (this cost is dominated by the
+#   fixed per-sample mesh build + coupled solve, not by which particular
+#   parameter values were sampled, so it should scale close to linearly
+#   with sample count). At n_train+n_val+n_test+n_edge_holdout = 360 below,
+#   that's ~360 * 1.6s =~ 9-10 minutes.
+# - `thrombus-train` at configs/demo_cpu.yaml's defaults (n_train=24,
+#   batch_size=16 -> 2 batches/epoch) took ~8.65s for 40 epochs, i.e.
+#   ~0.22 s/epoch. At n_train=240 below (same batch_size=16 -> 15
+#   batches/epoch, ~7.5x more batches/epoch), that's an estimated
+#   ~1.6 s/epoch; at 150 epochs below, ~4 minutes.
+# - `thrombus-benchmark`'s own cost is dominated by a fixed-size re-timed
+#   mechanistic re-solve (independent of dataset size) plus forward passes
+#   over the (still small) neural surrogate -- comparable to
+#   configs/demo_cpu.yaml's ~2s, call it under a minute of margin.
+# Total estimate: roughly ~15 minutes end to end on CPU. If that's not
+# tractable for your use case, scale `data.n_train` down before scaling
+# `optim.epochs` up -- dataset generation is the dominant cost here.
+#
+# Splits keep configs/demo_cpu.yaml's train:val:test:edge_holdout
+# proportions (train : each of the others ~= 6:1) at a size where the
+# distance-based edge-of-domain holdout split (data/sampler.py) has enough
+# samples on each side to be meaningful, rather than picking 3-4 arbitrary
+# extreme points out of a handful of total samples.
+#
+# Same neural architecture (encoder/operator-core sizes) and physics-loss
+# weights as configs/demo_cpu.yaml -- this config only scales dataset size
+# and training length, per the "pilot vs. demo" distinction; it is not
+# claiming a separately-tuned architecture (see README.md "Known
+# limitations": "Neural surrogate is a small demo model ... not a tuned
+# architecture").
+
+seed: 0
+
+data:
+  # NOTE: this key is not actually read by any CLI entry point (each
+  # defaults its own --output-dir/--dataset-dir to "data/processed"
+  # independently) -- use --output-dir/--dataset-dir explicitly (e.g.
+  # "data/processed_pilot") if you don't want a pilot run to overwrite a
+  # demo-scale dataset in place, or vice versa. See README.md "How to run".
+  dataset_dir: data/processed
+  n_train: 240
+  n_val: 40
+  n_test: 40
+  # Explicit edge-of-domain holdout split (still drawn from the same sampled
+  # distribution, not a different population): parameter combinations at the
+  # extremes of the sampled ranges (see data/sampler.py), held out from
+  # train/val entirely and evaluated separately in
+  # benchmark/edge_holdout_eval.py.
+  n_edge_holdout: 40
+  edge_holdout_quantile: 0.9   # samples in the outer (1-quantile) tail of
+                               # platelet/heparin/inlet-velocity ranges are
+                               # routed to n_edge_holdout
+
+model:
+  # Geometry/parameter encoder -> latent grid (encoder.py). latent_grid_size
+  # must match the grid_size used by data/generate_dataset.py to rasterize
+  # the mechanistic solver's output (default 32x32; see its --grid-size flag).
+  encoder:
+    param_dim: 8            # data/generate_dataset.PARAM_ORDER: [aneurysm_d, vessel_d, v_in, platelet_conc, heparin_conc, PT, AT, FG]
+    latent_grid_size: [32, 32]
+    hidden_channels: 32
+    n_layers: 2
+
+  # Operator core (operator_core.py): "fno" (Fourier Neural Operator) is
+  # implemented; "gnn" (message-passing graph network on the FEM mesh) is a
+  # documented-but-not-implemented extension point -- see operator_core.py.
+  operator_core:
+    type: fno
+    fno:
+      modes: 8
+      hidden_channels: 32
+      n_layers: 3
+    gnn:
+      hidden_channels: 32
+      n_message_passing_steps: 6
+
+  # Output channels, matching data/dataset.FIELD_NAMES: velocity_x,
+  # velocity_y, conc_RP, conc_AP, conc_APR, conc_APS, conc_T, conc_AT,
+  # conc_PT, conc_FG, conc_FI.
+  output_channels: 11
+
+  uncertainty:
+    method: deep_ensemble    # "deep_ensemble" or "mc_dropout"
+    n_ensemble_members: 3
+    mc_dropout_rate: 0.1
+    mc_dropout_n_samples: 30
+
+physics_loss:
+  enabled: true
+  # Whether PDE residuals are computed via autograd on a continuous
+  # (coordinate -> field) reparameterization of the network output, or via
+  # finite differences on the regular latent grid. See
+  # neural/physics_losses.py docstring.
+  residual_mode: finite_difference   # "autograd" or "finite_difference"
+  # Only mass_conservation and nonnegativity are implemented in
+  # neural/physics_losses.py's total_physics_loss. navier_stokes_residual is
+  # implemented but not wired in there -- besides a viscosity scalar, it
+  # needs a predicted pressure field that the surrogate doesn't output (no
+  # entry in data/dataset.FIELD_NAMES); cdr_residual and
+  # surface_flux_bc_residual are unimplemented placeholders. See that
+  # module's docstring. Weight entries for these are omitted here since
+  # train.py's weights.get(name, 0.0) would silently ignore them anyway.
+  weights:
+    data: 1.0
+    mass_conservation: 0.05
+    nonnegativity: 0.1
+
+optim:
+  epochs: 150   # ~4 min at this dataset size -- see header comment
+  batch_size: 16
+  lr: 3.0e-4
+  weight_decay: 1.0e-5
+  optimizer: adamw
+  lr_schedule: cosine
+  grad_clip_norm: 1.0
+  early_stopping_patience: 20
+
+logging:
+  backend: csv       # "csv" or "tensorboard"
+  log_dir: runs/
+  checkpoint_dir: checkpoints/
+  log_every_n_steps: 10

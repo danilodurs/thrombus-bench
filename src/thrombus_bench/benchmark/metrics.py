@@ -47,11 +47,27 @@ def thrombus_iou(pred_mask: np.ndarray, ref_mask: np.ndarray) -> float:
     return float(intersection) / float(union) if union > 0 else 1.0
 
 
-def field_rmse(pred_fields: np.ndarray, true_fields: np.ndarray) -> dict:
+def field_rmse(pred_fields: np.ndarray, true_fields: np.ndarray, mask: np.ndarray | None = None) -> dict:
     """RMSE between predicted and reference field grids, shape (C, H, W) or
-    (B, C, H, W). Returns {"overall": float, "per_channel": (C,) array}."""
+    (B, C, H, W). Returns {"overall": float, "per_channel": (C,) array,
+    "fluid_only": float | None, "per_channel_fluid_only": (C,) array | None}.
 
-    axis = tuple(range(pred_fields.ndim - 2, pred_fields.ndim)) if pred_fields.ndim >= 3 else None
+    The unmasked ("all cells") `"overall"`/`"per_channel"` entries are
+    unchanged from before `mask` existed -- default `mask=None` keeps every
+    existing caller/test's behavior identical.
+
+    `mask` (optional; `data/dataset.py`'s `fluid_mask`, shape (H, W) for a
+    single sample or (B, H, W) for a batch -- no channel dimension, it's
+    shared across channels) restricts an *additional* RMSE to fluid cells
+    only. The vessel+aneurysm domain occupies only part of the
+    rasterization bounding box (see `data/generate_dataset._fluid_mask`);
+    the exterior background is comparatively easy to reconstruct (mostly
+    constant/near-zero filler from `griddata(method="nearest")`), so an
+    unmasked RMSE alone can make a surrogate look more accurate on the
+    fluid interior than it really is -- this "fluid_only" pair makes that
+    gap visible instead of hiding it inside a single blended number.
+    """
+
     sq_err = (pred_fields - true_fields) ** 2
     if pred_fields.ndim == 4:
         per_channel = np.sqrt(sq_err.mean(axis=(0, 2, 3)))
@@ -59,7 +75,31 @@ def field_rmse(pred_fields: np.ndarray, true_fields: np.ndarray) -> dict:
         per_channel = np.sqrt(sq_err.mean(axis=(1, 2)))
     else:
         per_channel = None
-    return {"overall": float(np.sqrt(sq_err.mean())), "per_channel": per_channel}
+
+    result = {
+        "overall": float(np.sqrt(sq_err.mean())),
+        "per_channel": per_channel,
+        "fluid_only": None,
+        "per_channel_fluid_only": None,
+    }
+    if mask is None:
+        return result
+
+    if pred_fields.ndim == 4:
+        mask_b = mask.astype(sq_err.dtype)[:, None, :, :]  # broadcast over the channel axis
+        spatial_axes = (0, 2, 3)
+    elif pred_fields.ndim == 3:
+        mask_b = mask.astype(sq_err.dtype)[None, :, :]
+        spatial_axes = (1, 2)
+    else:
+        raise ValueError("field_rmse: mask is only supported alongside 3D (C,H,W) or 4D (B,C,H,W) pred_fields")
+
+    n_channels = pred_fields.shape[-3]
+    n_fluid = float(mask.sum())  # fluid-cell count across batch/spatial dims, same for every channel
+    masked_sq_err = sq_err * mask_b
+    result["per_channel_fluid_only"] = np.sqrt(masked_sq_err.sum(axis=spatial_axes) / max(n_fluid, 1.0))
+    result["fluid_only"] = float(np.sqrt(masked_sq_err.sum() / max(n_fluid * n_channels, 1.0)))
+    return result
 
 
 def max_M_at_relative_error(pred: np.ndarray, true: np.ndarray, eps: float = 1e-12) -> np.ndarray:

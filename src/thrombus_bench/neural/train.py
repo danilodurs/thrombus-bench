@@ -10,7 +10,10 @@ Standard supervised training loop over `data/dataset.py`
   field grids.
 * Physics losses: `neural/physics_losses.py` `total_physics_loss`
   (mass-conservation + non-negativity penalties), weighted per
-  `configs/training.yaml` `physics_loss.weights`.
+  `configs/training.yaml` `physics_loss.weights`. Evaluated with
+  `batch["fluid_mask"]` (`data/dataset.py`) so the exterior (non-fluid)
+  raster cells don't dilute either penalty -- see `physics_losses.py`'s
+  "Fluid-domain masking" docstring section.
 
 Hyperparameters (optimizer, LR schedule, epochs, batch size, early
 stopping) come from `configs/training.yaml` `optim`; only CSV logging is
@@ -65,7 +68,7 @@ def train(cfg: dict, dataset_dir: str, checkpoint_path: str, log_path: str) -> d
             data_loss = torch.nn.functional.mse_loss(pred, batch["fields"])
             loss = weights["data"] * data_loss
             if physics_cfg["enabled"]:
-                phys = total_physics_loss(pred, weights, physics_cfg["residual_mode"])
+                phys = total_physics_loss(pred, weights, physics_cfg["residual_mode"], mask=batch["fluid_mask"])
                 for name, value in phys.items():
                     loss = loss + weights.get(name, 0.0) * value
             loss.backward()
@@ -106,7 +109,7 @@ def train(cfg: dict, dataset_dir: str, checkpoint_path: str, log_path: str) -> d
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=str, default="configs/training.yaml")
+    parser.add_argument("--config", type=str, default="configs/demo_cpu.yaml")
     parser.add_argument("--dataset-dir", type=str, default="data/processed")
     parser.add_argument("--checkpoint", type=str, default="checkpoints/model.pt")
     parser.add_argument("--log", type=str, default="runs/train_log.csv")

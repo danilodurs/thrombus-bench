@@ -10,6 +10,7 @@ sign-preserving). See `physics_losses.py`'s module docstring.
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from thrombus_bench.data.dataset import field_to_log, log_to_field
@@ -141,6 +142,66 @@ def test_central_diff_has_no_periodic_wraparound_artifact_at_boundary():
     assert diff[..., -1].item() > 0  # no spurious sign flip at the right boundary
     assert not torch.allclose(diff[..., 0], old_periodic[..., 0])
     assert not torch.allclose(diff[..., -1], old_periodic[..., -1])
+
+
+def test_mass_conservation_penalty_masked_ignores_exterior_divergence_spike():
+    """A velocity ramp [0,1,2,3] (physical space, mask=fluid) followed by a
+    huge jump to [100,200] (mask=exterior) -- e.g. griddata(nearest)-filled
+    junk outside the FEM mesh domain. Unmasked, that jump dominates the mean
+    squared divergence; masked (and eroded by one pixel, since the boundary
+    fluid cell's central difference reads the exterior neighbor's value)
+    it must be invisible, leaving exactly the ramp's own constant-slope
+    divergence (1.0 at each of the three innermost fluid cells)."""
+
+    velocity_x = torch.tensor([0.0, 1.0, 2.0, 3.0, 100.0, 200.0]).reshape(1, 1, 1, 6)
+    velocity_y = torch.zeros(1, 1, 1, 6)  # H=1 makes the dv/dy term identically zero
+    mask = torch.tensor([1.0, 1.0, 1.0, 1.0, 0.0, 0.0]).reshape(1, 1, 6)
+
+    unmasked = mass_conservation_penalty(velocity_x, velocity_y)
+    masked = mass_conservation_penalty(velocity_x, velocity_y, mask=mask)
+
+    # Eroding [1,1,1,1,0,0] drops index 3 (its right neighbor, index 4, is
+    # exterior), leaving indices 0,1,2 -- whose divergence is exactly 1 each
+    # (forward difference at the boundary, central difference in the
+    # interior of the ramp), so mean == 1.0 exactly.
+    assert masked.item() == pytest.approx(1.0, abs=1e-5)
+    assert unmasked.item() > 100.0  # dominated by the 100/200 exterior spike
+    assert masked.item() < unmasked.item()
+
+
+def test_nonnegativity_penalty_masked_ignores_exterior_violation():
+    """A field with a huge negative value in an exterior (mask=0) cell must
+    not affect the masked penalty at all, unlike the unmasked one -- no
+    erosion needed here since this is a pointwise check, not a derivative."""
+
+    field = torch.tensor([-5.0, 0.1, 0.2, -1000.0]).reshape(1, 1, 1, 4)
+    mask = torch.tensor([1.0, 1.0, 1.0, 0.0]).reshape(1, 1, 4)
+
+    unmasked = nonnegativity_penalty(field)
+    masked = nonnegativity_penalty(field, mask=mask)
+
+    expected_masked = (25.0 + 0.0 + 0.0) / 3.0
+    assert masked.item() == pytest.approx(expected_masked, rel=1e-5)
+    assert unmasked.item() > 1000.0  # dominated by the -1000 exterior value
+    assert masked.item() < unmasked.item()
+
+
+def test_total_physics_loss_forwards_mask_to_both_penalties():
+    """Regression guard: total_physics_loss must pass `mask` through to both
+    mass_conservation_penalty and nonnegativity_penalty, not just compute
+    the unmasked default."""
+
+    torch.manual_seed(0)
+    predicted_fields = torch.randn(1, 11, 4, 4)
+    mask = torch.ones(1, 4, 4)
+    mask[0, 0, 0] = 0.0  # one exterior corner cell
+    weights = {"data": 1.0, "mass_conservation": 0.05, "nonnegativity": 0.1}
+
+    result_masked = total_physics_loss(predicted_fields, weights, mode="finite_difference", mask=mask)
+    result_unmasked = total_physics_loss(predicted_fields, weights, mode="finite_difference", mask=None)
+
+    assert not torch.allclose(result_masked["mass_conservation"], result_unmasked["mass_conservation"])
+    assert not torch.allclose(result_masked["nonnegativity"], result_unmasked["nonnegativity"])
 
 
 def test_central_diff_zero_for_size_one_axis():

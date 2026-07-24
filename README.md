@@ -41,14 +41,21 @@ against analytical/sanity cases, surface ODE unit tests, species transport,
 coupled-solver integration tests, neural forward/gradient tests, benchmark
 metric tests).
 
-**Scale caveat:** `configs/training.yaml`'s defaults (24/6/6/6
-train/val/test/edge_holdout samples, 32×32 grid, 40 epochs) are a
-*reduced-scale demo*, not the full O(100-1000)-sample dataset originally
-scoped — chosen so the entire pipeline (`thrombus-generate-dataset` →
-`thrombus-train` → `thrombus-benchmark`) runs in a few minutes on CPU in one
-session. Scale up `data.n_train`/`n_val`/`n_test`/`n_edge_holdout` and
-`optim.epochs` for a more statistically meaningful benchmark; nothing in the
-code depends on these particular values.
+**Scale caveat:** the CLI default, `configs/demo_cpu.yaml` (24/6/6/6
+train/val/test/edge_holdout samples, 32×32 grid, 40 epochs), is a
+*reduced-scale pipeline smoke test*, not the full O(100-1000)-sample
+dataset originally scoped — chosen so the entire pipeline
+(`thrombus-generate-dataset` → `thrombus-train` → `thrombus-benchmark`)
+runs in a few minutes on CPU in one session. Its numbers should never be
+read as a real benchmark result. `configs/pilot.yaml` (240/40/40/40
+samples, 150 epochs, ~15 minutes on CPU — see that file's header comment
+for the wall-clock estimate and its basis) is sized to actually produce a
+meaningful, if still CPU-modest, result; scale `data.n_train`/`n_val`/
+`n_test`/`n_edge_holdout` and `optim.epochs` further still for something
+closer to the original full scope. Nothing in the code depends on any
+particular values in these config files. See "How to run" below for the
+demo vs. pilot commands, and "Configuration" for what each `configs/*.yaml`
+file is for.
 
 ## Architecture
 
@@ -460,8 +467,16 @@ Or explore interactively: `jupyter notebook notebooks/01_explore_mechanistic_bas
 
 ### Run the full benchmark pipeline (dataset → training → report)
 
+Two sizes are available (see "Scale caveat" above): **demo** (the CLI
+default, `configs/demo_cpu.yaml` -- a pipeline smoke test, a few minutes,
+not a real benchmark) and **pilot** (`configs/pilot.yaml` -- a real,
+if still CPU-modest, benchmark, ~15 minutes). Both use the same three
+commands; only the config and output directories differ.
+
 ```bash
-# 1. Generate the (demo-scale, see "Scale caveat" above) dataset:
+# --- Demo (pipeline smoke test, ~a few minutes; uses the CLI defaults) ---
+
+# 1. Generate the demo-scale dataset:
 thrombus-generate-dataset --output-dir data/processed
 
 # 2. Train the neural surrogate:
@@ -471,13 +486,26 @@ thrombus-train --dataset-dir data/processed --checkpoint checkpoints/model.pt
 thrombus-benchmark --checkpoint checkpoints/model.pt --dataset-dir data/processed
 ```
 
+```bash
+# --- Pilot (real benchmark, ~15 minutes -- see configs/pilot.yaml's header
+#     comment for the estimate's basis; a separate --output-dir/
+#     --dataset-dir keeps this from overwriting the demo dataset above) ---
+
+# 1. Generate the pilot-scale dataset:
+thrombus-generate-dataset --training-config configs/pilot.yaml --output-dir data/processed_pilot
+
+# 2. Train the neural surrogate:
+thrombus-train --config configs/pilot.yaml --dataset-dir data/processed_pilot --checkpoint checkpoints/model_pilot.pt
+
+# 3. Run the benchmark, producing results/report.md + PNGs:
+thrombus-benchmark --training-config configs/pilot.yaml --checkpoint checkpoints/model_pilot.pt --dataset-dir data/processed_pilot --output-dir results_pilot
+```
+
 `thrombus-generate-dataset` and `thrombus-benchmark` also accept
-`--training-config`/`--physio-config`/`--geometry-config` overrides
-(default to the `configs/*.yaml` files in this repo); `thrombus-train` only
-takes `--config` (default `configs/training.yaml` -- it doesn't need
-physio/geometry parameters since it trains on already-rasterized data).
-See `--help` on each command, or the corresponding module's `main()` in
-`src/thrombus_bench/{data,neural,benchmark}/`.
+`--physio-config`/`--geometry-config` overrides (default to the
+`configs/*.yaml` files in this repo, unaffected by the demo/pilot choice
+above). See `--help` on each command, or the corresponding module's
+`main()` in `src/thrombus_bench/{data,neural,benchmark}/`.
 
 ### Run tests
 
@@ -494,9 +522,18 @@ pytest
   parameters, with inline citations to the specific equation/table each
   value comes from, and inline notes on assumptions (see "Assumptions &
   Deviations" above).
-- `configs/training.yaml`: neural surrogate architecture, physics-loss
+- `configs/demo_cpu.yaml`: neural surrogate architecture, physics-loss
   weights, optimizer, and dataset split sizes (including the edge-of-domain
-  holdout split).
+  holdout split), at pipeline-smoke-test scale -- see "Scale caveat" above.
+  This is the CLI default for `--training-config`/`--config` across all
+  three entry points. `configs/training.yaml` is kept as a symlink to this
+  file, for anything still written against the old path.
+- `configs/pilot.yaml`: the same structure as `configs/demo_cpu.yaml`, at
+  pilot-benchmark scale -- see "Scale caveat" above and this file's own
+  header comment for its sizing rationale.
+- `configs/ci_smoke.yaml`: an even smaller variant used only by
+  `.github/workflows/ci.yml`'s end-to-end smoke test (not meant for
+  interactive use).
 
 ## Contributors
 

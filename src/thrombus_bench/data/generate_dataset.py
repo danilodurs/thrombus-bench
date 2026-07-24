@@ -27,9 +27,15 @@ For each parameter sample from `sampler.py`:
    `CoupledSimulationHistory.clip_event_counts`), and `conc_{species}_min`/
    `conc_{species}_max` (raw nodal field extrema, pre-rasterization -- a
    cheap way to spot NaN/Inf/out-of-range values without scanning the full
-   grid). This is this project's only per-sample QC signal beyond visual
-   inspection; none of it is consumed by training/evaluation automatically
-   -- see `data/dataset.py`'s docstring for how to read it back.
+   grid), and `fluid_mask` (`grid_size`-shaped float32 0/1 raster, True
+   where a grid cell center falls inside the actual FEM mesh domain --
+   see `_fluid_mask`; the vessel+aneurysm domain is an L/T-shaped union, so
+   the bounding-box grid `_rasterize` interpolates onto contains genuine
+   exterior cells that `griddata(method="nearest")` otherwise silently
+   fills with a nearby in-domain node's value). This is this project's only
+   per-sample QC signal beyond visual inspection; none of it is consumed by
+   training/evaluation automatically -- see `data/dataset.py`'s docstring
+   for how to read it back.
 5. Route each sample to train/val/test/edge_holdout per
    `sampler.split_train_val_test_edge_holdout`.
 
@@ -46,6 +52,7 @@ import os
 
 import numpy as np
 import yaml
+from matplotlib.tri import Triangulation
 from scipy.interpolate import griddata
 
 from thrombus_bench.mechanistic.coupled_solver import run_coupled_simulation
@@ -69,6 +76,37 @@ def _rasterize(node_coords: np.ndarray, values: np.ndarray, grid_size: tuple[int
     gx, gy = np.meshgrid(np.linspace(xmin, xmax, grid_size[1]), np.linspace(ymin, ymax, grid_size[0]))
     grid = griddata(node_coords.T, values, (gx, gy), method="nearest")
     return grid
+
+
+def _fluid_mask(node_coords: np.ndarray, triangles: np.ndarray, grid_size: tuple[int, int]) -> np.ndarray:
+    """Boolean-as-float32 raster mask, True (1.0) where a grid cell center
+    falls inside the actual FEM mesh domain, False (0.0) otherwise.
+
+    The vessel+aneurysm domain is an L/T-shaped union (a long thin vessel
+    rectangle with a circular sac bulging from the top) -- `_rasterize`'s
+    regular grid spans the mesh nodes' axis-aligned bounding box, which
+    contains genuine exterior cells (e.g. above the vessel walls, outside
+    the sac footprint). `griddata(method="nearest")` silently fills those
+    exterior cells with whatever in-domain node happens to be nearest, which
+    is not a physically meaningful value; this mask flags which raster
+    cells are trustworthy.
+
+    Built from the mesh's own triangulation (`matplotlib.tri.Triangulation`
+    + `get_trifinder`, a point-in-triangle test) rather than reconstructing
+    the analytic domain outline, so it stays correct for any mesh this
+    project can produce (the fill/thinning in `mesh.py` means the actual
+    triangulated domain isn't perfectly identical to the analytic polygon).
+    Uses the same grid convention as `_rasterize` (bounding box of
+    `node_coords`, `grid_size = (n_rows, n_cols)`).
+    """
+
+    xmin, ymin = node_coords.min(axis=1)
+    xmax, ymax = node_coords.max(axis=1)
+    gx, gy = np.meshgrid(np.linspace(xmin, xmax, grid_size[1]), np.linspace(ymin, ymax, grid_size[0]))
+
+    triangulation = Triangulation(node_coords[0], node_coords[1], triangles.T)
+    membership = triangulation.get_trifinder()(gx.ravel(), gy.ravel())
+    return (membership >= 0).astype(np.float32).reshape(grid_size)
 
 
 def _run_one_sample(sample: dict, physio_base: dict, mesh_cfg: dict, end_time_s: float, dt_s: float, grid_size: tuple[int, int]) -> dict:
@@ -105,6 +143,7 @@ def _run_one_sample(sample: dict, physio_base: dict, mesh_cfg: dict, end_time_s:
         "velocity_x": _rasterize(node_coords, ux, grid_size),
         "velocity_y": _rasterize(node_coords, uy, grid_size),
     }
+    fluid_mask = _fluid_mask(node_coords, tagged_mesh.mesh.t, grid_size)
     conc_min_max = {}
     for name in _ALL_SPECIES:
         nodal = final.concentrations[name][:n_vertices]
@@ -130,6 +169,7 @@ def _run_one_sample(sample: dict, physio_base: dict, mesh_cfg: dict, end_time_s:
         "flow_n_iterations": int(final.flow.n_iterations),
         "flow_residual": float(final.flow.residual),
         "thrombin_fibrin_reliable": bool(history.thrombin_fibrin_reliable),
+        "fluid_mask": fluid_mask,
         **clip_counts,
         **conc_min_max,
         **fields,
@@ -201,7 +241,7 @@ def generate_dataset(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--training-config", type=str, default="configs/training.yaml")
+    parser.add_argument("--training-config", type=str, default="configs/demo_cpu.yaml")
     parser.add_argument("--physio-config", type=str, default="configs/physio_params.yaml")
     parser.add_argument("--geometry-config", type=str, default="configs/geometry.yaml")
     parser.add_argument("--output-dir", type=str, default="data/processed")

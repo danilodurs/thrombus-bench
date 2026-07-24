@@ -8,6 +8,12 @@ expose them as a `torch.utils.data.Dataset` yielding, per sample:
 
 * `params`: the sampled parameter vector (geometry + physiology + inlet
   velocity), shape `(8,)`, order matching `generate_dataset.PARAM_ORDER`.
+  Min-max normalized to `[-1, 1]` per `sampler.normalize_params` (based on
+  `sampler.DEFAULT_RANGES`, the same physical ranges used for sampling) --
+  raw values span wildly different scales (e.g. `platelet_conc_plt_ml`
+  ~1e8 vs. `heparin_conc_uM` ~0.1-0.5), which a `nn.Linear` handles poorly
+  un-normalized. Use `sampler.denormalize_params` to invert back to
+  physical units (e.g. for plotting).
 * `fields`: stacked target field channels (velocity x/y + 9 species
   concentrations), shape `(11, H, W)`, **log-compressed**: `field_to_log`
   applies `sign(x) * log1p(|x|)` per element. Raw field magnitudes span
@@ -38,6 +44,15 @@ expose them as a `torch.utils.data.Dataset` yielding, per sample:
   each species' raw (pre-rasterization, pre-log-compression) nodal field
   extrema -- a cheap way to spot NaN/Inf/out-of-range values without
   decoding `fields`.
+* `fluid_mask`: shape-`(H, W)` float32 0/1 raster, True where a grid cell
+  center falls inside the actual FEM mesh domain (`generate_dataset.
+  _fluid_mask`) -- the vessel+aneurysm domain is an L/T-shaped union, so
+  `fields`'s bounding-box grid contains genuine exterior cells that
+  `griddata(method="nearest")` silently filled with a nearby in-domain
+  node's value. Kept out of `fields`/`FIELD_NAMES` deliberately: it's not a
+  physical quantity to log-compress or predict, just context for
+  interpreting the other channels (e.g. masking the loss/metrics to
+  in-domain cells only).
 
 Train/val/test/edge-of-domain splits are read from the corresponding
 subdirectory written by `generate_dataset.py`
@@ -53,6 +68,8 @@ from typing import Literal
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+
+from .sampler import ParameterSpace, normalize_params
 
 FIELD_NAMES = ("velocity_x", "velocity_y", "conc_RP", "conc_AP", "conc_APR", "conc_APS", "conc_T", "conc_AT", "conc_PT", "conc_FG", "conc_FI")
 # Species name order for the `clip_counts`/`conc_min`/`conc_max` QC arrays,
@@ -80,6 +97,7 @@ class ThrombusSurrogateDataset(Dataset):
         self.files = sorted(glob.glob(os.path.join(dataset_dir, split, "sample_*.npz")))
         if not self.files:
             raise FileNotFoundError(f"No samples found in {os.path.join(dataset_dir, split)}")
+        self.param_space = ParameterSpace()
 
     def __len__(self) -> int:
         return len(self.files)
@@ -88,8 +106,9 @@ class ThrombusSurrogateDataset(Dataset):
         data = np.load(self.files[idx])
         fields = np.stack([data[name] for name in FIELD_NAMES], axis=0).astype(np.float32)
         fields = field_to_log(fields)
+        params_normalized = normalize_params(data["params"], self.param_space).astype(np.float32)
         return {
-            "params": torch.from_numpy(data["params"].astype(np.float32)),
+            "params": torch.from_numpy(params_normalized),
             "fields": torch.from_numpy(fields),
             "max_M_at": torch.tensor(float(data["max_M_at"]), dtype=torch.float32),
             "thrombosed_fraction": torch.tensor(float(data["thrombosed_fraction"]), dtype=torch.float32),
@@ -105,4 +124,5 @@ class ThrombusSurrogateDataset(Dataset):
             "conc_max": torch.tensor(
                 [float(data[f"conc_{name}_max"]) for name in _SPECIES_NAMES], dtype=torch.float32
             ),
+            "fluid_mask": torch.from_numpy(data["fluid_mask"].astype(np.float32)),
         }

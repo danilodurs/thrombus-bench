@@ -54,6 +54,36 @@ class ParameterSpace:
         return tuple(self.ranges.keys())
 
 
+def normalize_params(params: np.ndarray, space: ParameterSpace) -> np.ndarray:
+    """Min-max normalize a raw parameter vector to [-1, 1], based on `space`'s
+    physical ranges (the same `DEFAULT_RANGES` used for sampling -- so the
+    surrogate never has to learn about e.g. `platelet_conc_plt_ml` (~1e8)
+    and `heparin_conc_uM` (~0.1-0.5) living on wildly different scales).
+
+    `params`'s last axis must be ordered to match `space.names` (i.e.
+    `generate_dataset.PARAM_ORDER`, which is defined in that same order).
+    Accepts a single `(n_params,)` vector or a `(..., n_params)` batch.
+
+    `normalized = 2 * (raw - low) / (high - low) - 1`. Inverse:
+    `denormalize_params`.
+    """
+
+    names = space.names
+    lows = np.array([space.ranges[n][0] for n in names], dtype=np.float64)
+    highs = np.array([space.ranges[n][1] for n in names], dtype=np.float64)
+    return 2.0 * (np.asarray(params, dtype=np.float64) - lows) / (highs - lows) - 1.0
+
+
+def denormalize_params(normalized: np.ndarray, space: ParameterSpace) -> np.ndarray:
+    """Inverse of `normalize_params`: map [-1, 1]-normalized values back to
+    physical units (for interpretability/plotting)."""
+
+    names = space.names
+    lows = np.array([space.ranges[n][0] for n in names], dtype=np.float64)
+    highs = np.array([space.ranges[n][1] for n in names], dtype=np.float64)
+    return lows + (np.asarray(normalized, dtype=np.float64) + 1.0) / 2.0 * (highs - lows)
+
+
 def latin_hypercube_sample(space: ParameterSpace, n_samples: int, seed: int = 0) -> list[dict]:
     """Draw `n_samples` Latin hypercube samples from `space`.
 
