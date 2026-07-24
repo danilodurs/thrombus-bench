@@ -48,11 +48,13 @@ docstring), `physics_loss.weights.mass_conservation` (if nonzero) adds
 collocation points (`physics_loss.n_collocation_points` per sample) plus a
 true `torch.autograd.grad` divergence residual on the model's own
 continuous output, per Phase 5. Only added to the *train* loss, mirroring
-`train`'s own physics-loss-only-during-training convention -- val/test
-loss (here and in `benchmark.run_benchmark.benchmark_continuous_placeholder`)
-stays pure data loss, so the two remain directly comparable. `nonnegativity`
-(finite-difference-only, operates on a raster) has no continuous-path
-counterpart yet.
+`train`'s own physics-loss-only-during-training convention -- val loss
+here stays pure data loss. `benchmark.run_benchmark.run_benchmark_continuous`
+(Phase 7) reports a separate accuracy metric (`benchmark.metrics.
+field_rmse_pointwise`, not this module's masked-MSE training loss) on the
+test split, so the two numbers are not directly comparable to each other
+either. `nonnegativity` (finite-difference-only, operates on a raster) has
+no continuous-path counterpart yet.
 """
 
 from __future__ import annotations

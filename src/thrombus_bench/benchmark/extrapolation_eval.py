@@ -28,6 +28,13 @@ This also requires a *separately trained* model/checkpoint (one trained on
 the default demo/pilot checkpoint would not test extrapolation at all,
 since that checkpoint's training data already spans the full parameter
 range, including whatever sub-interval would otherwise be "withheld".
+
+`evaluate_extrapolation_degradation_continuous` (Phase 7, `docs/
+continuous_surrogate_design.md`) is the point-query counterpart for
+`ContinuousThrombusSurrogate`/`neural.baselines.Continuous*`, using
+`PointCloudThrombusDataset` + `benchmark.metrics.field_rmse_pointwise` --
+same rationale as `edge_holdout_eval.py`'s continuous counterpart for
+keeping it a separate function rather than a mode-branch.
 """
 
 from __future__ import annotations
@@ -35,8 +42,8 @@ from __future__ import annotations
 import torch
 from torch.utils.data import DataLoader
 
-from ..data.dataset import ThrombusSurrogateDataset
-from .metrics import field_rmse
+from ..data.dataset import ThrombusSurrogateDataset, pointcloud_collate_fn
+from .metrics import field_rmse, field_rmse_pointwise
 
 
 def extrapolation_label(extrapolate_param: str, train_range: tuple[float, float], extrapolate_range: tuple[float, float]) -> str:
@@ -72,6 +79,42 @@ def evaluate_extrapolation_degradation(
             batch = next(iter(loader))
             pred = model(batch["params"])
         results[name] = field_rmse(pred.numpy(), batch["fields"].numpy())
+
+    degradation_ratio = (
+        results["extrapolation"]["overall"] / results["test"]["overall"] if results["test"]["overall"] > 0 else float("inf")
+    )
+    return {
+        "label": extrapolation_label(extrapolate_param, train_range, extrapolate_range),
+        "test": results["test"],
+        "extrapolation": results["extrapolation"],
+        "degradation_ratio": degradation_ratio,
+    }
+
+
+def evaluate_extrapolation_degradation_continuous(
+    model: torch.nn.Module,
+    test_dataset,
+    extrapolation_dataset,
+    extrapolate_param: str,
+    train_range: tuple[float, float],
+    extrapolate_range: tuple[float, float],
+) -> dict:
+    """Point-query counterpart of `evaluate_extrapolation_degradation` --
+    see module docstring. `model` is any of `ContinuousThrombusSurrogate` /
+    `neural.baselines.ContinuousMeanFieldBaseline` /
+    `ContinuousNearestNeighborBaseline`; `test_dataset`/
+    `extrapolation_dataset` are `data.dataset.PointCloudThrombusDataset`
+    instances. Same return shape as the grid version, using
+    `benchmark.metrics.field_rmse_pointwise` instead of `field_rmse`."""
+
+    model.eval()
+    results = {}
+    for name, dataset in (("test", test_dataset), ("extrapolation", extrapolation_dataset)):
+        loader = DataLoader(dataset, batch_size=len(dataset), collate_fn=pointcloud_collate_fn)
+        with torch.no_grad():
+            batch = next(iter(loader))
+            pred = model(batch["params_with_time"], batch["node_coords"], batch["batch_index"], batch["geometry_mm"])
+        results[name] = field_rmse_pointwise(pred.numpy(), batch["fields"].numpy())
 
     degradation_ratio = (
         results["extrapolation"]["overall"] / results["test"]["overall"] if results["test"]["overall"] > 0 else float("inf")

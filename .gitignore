@@ -20,7 +20,9 @@ data/*.npz
 data/raw/
 data/processed/
 data/processed_extrap_*/
+data/processed_extrap_*_continuous/
 data/processed_pilot/
+data/processed_continuous/
 checkpoints/
 *.ckpt
 *.pt

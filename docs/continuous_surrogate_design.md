@@ -52,6 +52,37 @@ Split the model into two reused/new stages instead of one:
   in Phase 1/3 below (nothing to reuse from elsewhere, since no
   checkpoint-level reliability tracking exists in the repo yet).
 
+### Finalized Phase 7 decisions (benchmark pipeline integration)
+
+- **`run_benchmark_continuous`** (`benchmark/run_benchmark.py`) supersedes
+  Phase 4's `benchmark_continuous_placeholder` (removed): a full report --
+  `ContinuousThrombusSurrogate` + both continuous baselines via point-query
+  RMSE (primary), an *optional* 4th row for a separately-trained grid FNO
+  via its own legacy grid RMSE (`--grid-checkpoint`, requires the dataset
+  to have been generated with `--also-save-raster` so both representations
+  coexist in the same files) in its own clearly-labeled section, edge-
+  holdout degradation, MC-dropout/deep-ensemble calibration, runtime, and
+  an M_at/IoU section mirroring the grid path's. Written to
+  `results/report_continuous.md` (distinct from the grid path's
+  `report.md`, since they're different checkpoints/models).
+- `edge_holdout_eval.py`/`extrapolation_eval.py` each got a
+  `..._continuous` counterpart function (`PointCloudThrombusDataset` +
+  `field_rmse_pointwise`), not a mode-branch -- same established pattern
+  as `train`/`train_continuous`. `scripts/evaluate_extrapolation_continuous.py`
+  mirrors the existing grid-path script, not wired into the main report
+  (matching that script's own precedent of staying separate).
+- `neural/uncertainty.py`'s `DeepEnsemble`/`MCDropoutWrapper` needed **no
+  changes** -- confirmed by actually running both against
+  `ContinuousThrombusSurrogate` (`tests/test_uncertainty.py`), not just
+  assumed; both are already `*args`-generic. `_FieldChannelsOnly`
+  (`run_benchmark.py`) needed one generalization: `forward(params)` ->
+  `forward(*args)`, so it works for both call signatures.
+- Confirmed (and tested against real generated files, not just the
+  abstract sampler partition) that `split_train_val_test_edge_holdout`'s
+  sample-level guarantee still holds for the point-cloud path: a sample's
+  `.npz` (every checkpoint together) is written to exactly one split
+  directory, so it structurally cannot leak across splits.
+
 ### Finalized Phase 6 decisions (baselines, metrics, visualization)
 
 - **`ContinuousMeanFieldBaseline`**: pools every training `(sample,

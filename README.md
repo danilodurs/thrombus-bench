@@ -29,12 +29,14 @@ prototype -- see the size caveats below and "Known limitations".
 | `mechanistic/activation.py`, `surface_ode.py`, `fibrin.py` | **Implemented & tested.** Chemical/mechanical activation (Appendix A/B), platelet adhesion/aggregation flux BCs + surface ODEs (Eqs. 6-7, C.1-C.20), Michaelis-Menten fibrin kinetics (Eqs. 16-17). |
 | `mechanistic/species_transport.py` | **Implemented & tested.** SUPG-stabilized implicit transport (huge Péclet numbers given Table 1's tiny diffusivities) + vectorized implicit reaction substepping (stiff kinetics, e.g. Eq. A.10's Γ reaching ~1e4 s⁻¹). |
 | `mechanistic/coupled_solver.py`, `run_simulation.py` | **Implemented & tested.** Full transient Stokes+CDR+surface-ODE coupling loop; CLI supports both flow-only and full-transient runs. See "Known limitations" re: thrombin/fibrin calibration. |
-| `data/sampler.py`, `generate_dataset.py`, `dataset.py` | **Implemented & tested.** LHS sampling + edge-of-domain tail split + opt-in genuine-extrapolation split (`sample_with_extrapolation_holdout`), batch mechanistic runs with grid rasterization, PyTorch `Dataset`. |
-| `neural/encoder.py`, `operator_core.py`, `model.py`, `train.py` | **Implemented & tested.** FiLM-conditioned encoder + a real (if small) Fourier Neural Operator; `operator_core.type: gnn` is a documented, deliberately-unimplemented extension point. |
-| `neural/physics_losses.py` | **Partially implemented.** `mass_conservation` and `nonnegativity` penalties (finite-difference mode) are implemented; `cdr_residual`, `surface_flux_bc_residual`, and `autograd` residual mode are not (see module docstring). |
-| `neural/uncertainty.py` | **Implemented & tested.** MC-dropout and deep-ensemble wrappers. |
-| `benchmark/metrics.py`, `edge_holdout_eval.py`, `extrapolation_eval.py`, `calibration.py`, `run_benchmark.py` | **Implemented & tested.** Field RMSE, edge-of-domain degradation, genuine-extrapolation degradation (opt-in, `scripts/evaluate_extrapolation.py`), UQ calibration (reliability diagram + ECE), runtime comparison, Markdown+PNG report. `thrombus_height_error`/`time_to_onset_error`/`physics_residual_audit` are not implemented (need full spatiotemporal fields this project's dataset doesn't save -- see `metrics.py` docstring). |
-| `viz/plots.py` | **Implemented.** |
+| `mechanistic/geometry_sdf.py` | **Implemented & tested.** Closed-form signed-distance-to-wall function for the idealized vessel+aneurysm domain (exact union of a rectangle + circular-arc sac, not a naive per-shape min/max), reused by both `CoordinateDecoder`'s SDF input feature and the autograd physics residual's collocation-point rejection sampling. See "Known limitations" re: scope (idealized geometries only). |
+| `data/sampler.py`, `generate_dataset.py`, `dataset.py` | **Implemented & tested.** LHS sampling + edge-of-domain tail split + opt-in genuine-extrapolation split (`sample_with_extrapolation_holdout`); `generate_dataset.py` now saves point-cloud `.npz` samples by default (mesh node coordinates + values, every checkpoint per `data.n_snapshots` -- no rasterization), with the legacy fixed-grid rasterization kept as an opt-in (`--also-save-raster`) for the comparison baseline. `dataset.py` exposes both `PointCloudThrombusDataset` (primary, ragged batching) and `ThrombusSurrogateDataset` (legacy/comparison, fixed raster). |
+| `neural/coordinate_encoding.py` | **Implemented & tested.** Fourier/SIREN-style sinusoidal positional encoding for the `CoordinateDecoder`'s continuous `(x, y)` input. |
+| `neural/encoder.py`, `operator_core.py`, `model.py`, `coordinate_decoder.py`, `train.py` | **Implemented & tested.** FiLM-conditioned encoder + a real (if small) Fourier Neural Operator, now factored into a shared trunk (`SurrogateBackbone`) feeding either the original `Conv2d` grid-projection head (`ThrombusSurrogate`, kept as a comparison baseline) or the new `CoordinateDecoder` head (`ContinuousThrombusSurrogate`, primary path) -- see "The coordinate-decoder design" below. `operator_core.type: gnn` is still a documented, deliberately-unimplemented extension point. `train.py` has both `train` (grid) and `train_continuous` (point-cloud, including the optional autograd physics-loss term and per-checkpoint species channel-exclusion) loops. |
+| `neural/physics_losses.py` | **Partially implemented, more so than before.** `mass_conservation` (both `finite_difference`, for the grid path, and now a real `autograd` mode -- `mass_conservation_penalty_autograd` + `sample_collocation_points` + `continuous_mass_conservation_loss`, PINN-style, for the continuous path) and `nonnegativity` (finite-difference only) are implemented. `cdr_residual` and `surface_flux_bc_residual` remain unimplemented -- Phase 5 assessed `cdr_residual` for the concentration-cap-unaffected species (RP/AP/APR/APS) as more tractable than previously assumed (their reaction terms turn out to be decoupled from the unreliable T/PT/FI pathway) but still real additional scope (autograd through the whole encoder for `d/dt`, a differentiable bulk shear-rate port, per-species Laplacians), so it was deliberately deferred rather than built; see that module's docstring. |
+| `neural/uncertainty.py` | **Implemented & tested.** MC-dropout and deep-ensemble wrappers; confirmed (not just assumed) to work unmodified with `ContinuousThrombusSurrogate`'s multi-argument forward signature, since both wrap `forward()` generically. |
+| `benchmark/metrics.py`, `edge_holdout_eval.py`, `extrapolation_eval.py`, `calibration.py`, `run_benchmark.py` | **Implemented & tested.** Field RMSE (`field_rmse`, grid) and its point-query counterparts (`field_rmse_pointwise`, `field_rmse_by_checkpoint`, `field_rmse_by_distance_to_wall` -- the last one new: RMSE binned by distance to the nearest wall, directly answering whether near-wall accuracy is worse than bulk accuracy), edge-of-domain degradation, genuine-extrapolation degradation (opt-in, `scripts/evaluate_extrapolation.py`/`evaluate_extrapolation_continuous.py`) -- each with a grid and a continuous counterpart function -- UQ calibration (reliability diagram + ECE, works unchanged for both model families), runtime comparison, a `bootstrap_metric_by_sample` utility (resamples whole `sample_id`s, not individual points/checkpoints -- no bootstrap CI code existed before this, so this is a pre-emptive correctness guardrail, not a fix), and Markdown+PNG report generation for both the grid path (`run_benchmark`, `results/report.md`) and the continuous path (`run_benchmark_continuous`, `results/report_continuous.md`, with an optional 4th grid-FNO comparison row). `thrombus_height_error`/`time_to_onset_error`/`physics_residual_audit` remain unimplemented (the point-cloud path's full per-checkpoint spatial fields could plausibly support the first two now, but that's unassessed, separate work -- see `metrics.py` docstring). |
+| `viz/plots.py`, `viz/rasterize_continuous.py` | **Implemented.** `rasterize_continuous_model` (new) queries a trained `ContinuousThrombusSurrogate` on a regular grid over the analytic bounding box (masking exterior cells via `geometry_sdf.py`) purely for display, so grid-style plots remain possible without the model itself being grid-based. |
 
 Run `pytest` — the full suite passes (mechanistic solver verification
 against analytical/sanity cases, surface ODE unit tests, species transport,
@@ -123,12 +125,23 @@ mesh.py (Delaunay vessel+aneurysm) ──▶ built once, reused every step
 "Hybrid" here means the model itself, not the comparison: a data-driven
 Fourier Neural Operator conditioned on the same geometry/physiological
 parameters as the mechanistic model, trained with physics-informed loss
-terms alongside the usual data loss (`neural/model.py` wires
-`encoder.py` + `operator_core.py`; `train.py` combines the losses):
+terms alongside the usual data loss. As of the continuous-surrogate work
+(`docs/continuous_surrogate_design.md`), the model is a **shared trunk with
+two interchangeable heads**: `encoder.py` + `operator_core.py`'s FNO blocks
+now stop one layer earlier (`neural/model.py`'s `SurrogateBackbone`),
+producing a latent *feature grid* rather than projecting straight to
+physical fields, and either **(a)** a `Conv2d` projection head
+(`ThrombusSurrogate`, today's original path, kept as a comparison baseline)
+or **(b)** a `CoordinateDecoder` head (`neural/coordinate_decoder.py`,
+`ContinuousThrombusSurrogate`, the new primary path) can consume that same
+latent grid. See "The coordinate-decoder design" below for why (b) exists
+and what it changes; `train.py` combines the losses for whichever head is
+in use (`train`/`train_continuous`):
 
 ```
-            8-scalar parameter vector θ
-     (geometry preset, physio params, inlet v)
+            9-scalar parameter vector θ
+     (existing 8: geometry preset, physio params,
+      inlet v -- plus normalized t, new)
                          │
                          ▼
         ┌─────────────────────────────────┐
@@ -148,65 +161,180 @@ terms alongside the usual data loss (`neural/model.py` wires
                          ▼
         ┌─────────────────────────────────┐
         │ operator_core.py                │
-        │ Fourier Neural Operator         │
-        │ (truncated spectral conv +      │
-        │ pointwise residual, per layer)  │
+        │ Fourier Neural Operator (FNO)   │
+        │ trunk (SurrogateBackbone) --    │
+        │ shared by both heads below      │
         │ [gnn backbone: unimplemented]   │
         └─────────────────────────────────┘
+                         │ latent feature grid
+                         │ (hidden_channels, H, W) --
+                         │ shared trunk output, consumed
+                         │ by either head below
+                         ▼
+        ── two interchangeable heads ──
+
+   (a) grid-projection head
+       [today's path, kept as a comparison
+        baseline -- neural/model.py]
+
+        ┌─────────────────────────────────┐
+        │ ThrombusSurrogate: Conv2d       │
+        │ projection -> (11, H, W)        │
+        │ predicted field grid            │
+        └─────────────────────────────────┘
                          │ predicted field grid
-                         │ (velocity x/y + 9 species)
                          ▼
         ┌─────────────────────────────────┐
         │ train.py loss                   │
         │ MSE data loss (vs. (A)'s        │
         │ rasterized fields) +            │
-        │ physics_losses.py:              │
-        │ mass-conservation +             │
-        │ non-negativity penalties        │
+        │ physics_losses.py (finite-      │
+        │ difference mass-conservation +  │
+        │ non-negativity penalties)       │
         └─────────────────────────────────┘
+
+   (b) CoordinateDecoder head
+       [new, primary path -- Phase 1-2,
+        neural/coordinate_decoder.py]
+
+       continuous query point (x, y) +
+       this sample's geometry parameters
+                         │
+                         ▼
+        ┌─────────────────────────────────┐
+        │ coordinate_encoding.py          │
+        │ Fourier/SIREN positional        │
+        │ encoding of (x, y)              │
+        └─────────────────────────────────┘
+                         │ positional features, merged with
+                         │ grid_sample'd local features
+                         │ (bilinear lookup into the trunk's
+                         │ latent grid above) and
+                         │ geometry_sdf.py's analytic
+                         │ signed-distance-to-wall(x, y)
+                         ▼
+        ┌─────────────────────────────────┐
+        │ coordinate_decoder.py           │
+        │ CoordinateDecoder: MLP +        │
+        │ residual blocks -> field        │
+        │ values at exactly (x, y)        │
+        └─────────────────────────────────┘
+                         │ predicted point values
+                         ▼
+        ┌─────────────────────────────────┐
+        │ train.py: train_continuous loss │
+        │ per-point MSE (channel-         │
+        │ exclusion for cap-affected      │
+        │ species) + physics_losses.py:   │
+        │ true autograd mass-conservation │
+        │ residual (PINN collocation)     │
+        └─────────────────────────────────┘
+
                          │
                          ▼
                          uncertainty.py: MC-dropout / deep-ensemble
                          wrapper repeats the forward pass for UQ
+                         (works unchanged for either head)
 ```
+
+### The coordinate-decoder design
+
+The grid-projection head (a) always produces a fixed-resolution raster --
+training data for it has to be rasterized too (`data/generate_dataset.
+_rasterize`, `scipy.interpolate.griddata`), which introduces interpolation
+error and wastes the FEM mesh's own resolution (different sampled
+geometries mesh differently, so a shared fixed grid was always an
+approximation of each mesh's actual resolution). The `CoordinateDecoder`
+head (b) instead predicts field values at an arbitrary, continuous query
+point `(x, y, t)`, so it can be trained directly against the mechanistic
+solver's own mesh node coordinates -- `data/dataset.
+PointCloudThrombusDataset` (ragged per-sample node counts, batched via a
+flat-points-plus-`batch_index` convention) supplies this point-sampled
+training data instead of a raster, and `generate_dataset.py` saves it by
+default (`_build_pointcloud_sample`; the legacy raster path is now opt-in,
+`--also-save-raster`, for `ThrombusSurrogateDataset`/baseline (a)).
+
+Two side-benefits of this shift, beyond avoiding the interpolation error
+itself:
+
+- **No more `_fluid_mask`/`griddata` artifacts in training data.** The
+  vessel+aneurysm domain doesn't fill its own rasterization bounding box
+  (an L/T-shaped union), so the grid path needs `_fluid_mask` to flag which
+  raster cells are real vs. `griddata`-filled background filler. Point-cloud
+  training data has no such problem -- every training point is a genuine
+  mesh node inside the fluid domain, by construction.
+- **A real `"autograd"` physics residual.** Because (b) is a genuinely
+  differentiable function of continuous `(x, y)` (and, for the encoder
+  input, `t`), PDE residuals can be computed via true `torch.autograd.grad`
+  on the model's own output at PINN-style collocation points, rather than
+  finite differences on a fixed grid. See `neural/physics_losses.py`'s
+  module docstring for exactly which residual is implemented this way
+  (`mass_conservation`) and which residual modes remain unimplemented
+  (`cdr_residual`, `surface_flux_bc_residual`) -- not duplicated here.
+
+`mechanistic/geometry_sdf.py`'s analytic signed-distance-to-wall function
+(reused by both the `CoordinateDecoder`'s SDF input feature and the
+autograd residual's collocation-point sampling) only works because this
+project's domains are idealized parametric shapes with a closed-form
+boundary -- see "Known limitations" below for the scope this doesn't
+extend to.
 
 ### Benchmark pipeline — dataset → train → report
 
 The three CLI entry points (`thrombus-generate-dataset` →
 `thrombus-train` → `thrombus-benchmark`) wire (A) and (B) above into an
-end-to-end pipeline:
+end-to-end pipeline. Each entry point now has two paths -- the new
+point-cloud path (primary, no `--continuous` flags needed on
+`thrombus-train`/`thrombus-benchmark` shown below since it's a
+per-command flag, not a separate command) and the legacy raster path
+(kept for baseline (a) above, opt-in via `--also-save-raster`/
+`--continuous`):
 
 ```
 data/sampler.py                data/generate_dataset.py
 (LHS sampling +      ──▶       batch-runs (A) mechanistic model per
- edge_holdout-tail split)       sample, rasterizes fields to a fixed
-                                 grid, writes data/processed/{split}/
-                                 sample_NNN.npz
+ edge_holdout-tail split)       sample, checkpointed at data.n_snapshots
+                                 points in time; writes data/processed/
+                                 {split}/sample_NNN.npz as point-cloud data
+                                 (Phase 1/3 schema: mesh node coords +
+                                 values, no rasterization by default) --
+                                 --also-save-raster additionally rasterizes
+                                 onto a fixed grid (legacy/comparison path)
                                        │
                                        ▼
                         thrombus-generate-dataset  (CLI)
                                        │
+                    ┌──────────────────┴──────────────────┐
+                    ▼                                     ▼
+        data/dataset.py                       data/dataset.py
+        PointCloudThrombusDataset              ThrombusSurrogateDataset
+        (primary -- ragged mesh                (legacy/comparison --
+        nodes + batch_index)                   fixed raster grid)
+                    │                                     │
+                    └──────────────────┬──────────────────┘
                                        ▼
-                        data/dataset.py
-                        ThrombusSurrogateDataset
+                        thrombus-train [--continuous]  (CLI)
+                        neural/train.py: train_continuous optimizes (B)
+                        ContinuousThrombusSurrogate (primary path) or
+                        train optimizes the grid ThrombusSurrogate
+                        (comparison baseline), against data loss +
+                        physics losses (neural/physics_losses.py)
                                        │
                                        ▼
-                        thrombus-train  (CLI)
-                        neural/train.py: optimizes (B) ThrombusSurrogate
-                        against MSE + physics losses (neural/physics_losses.py)
+                        checkpoints/{continuous_,}model.pt
                                        │
                                        ▼
-                        checkpoints/model.pt
-                                       │
-                                       ▼
-                        thrombus-benchmark  (CLI)
+                        thrombus-benchmark [--continuous]  (CLI)
                         benchmark/run_benchmark.py: evaluate on
-                        test+edge_holdout, compute metrics/edge_holdout_eval/
-                        calibration, time a fresh
-                        mechanistic re-solve, render viz/plots.py
+                        test+edge_holdout, compute point-query or grid
+                        field RMSE, edge_holdout_eval/calibration, time a
+                        fresh mechanistic re-solve, render viz/plots.py
+                        (opt-in extrapolation split: a separate script,
+                        scripts/evaluate_extrapolation[_continuous].py --
+                        not part of this main flow)
                                        │
                                        ▼
-                        results/report.md + PNGs
+                        results/report[_continuous].md + PNGs
 ```
 
 ## Equations summary
@@ -438,7 +566,25 @@ relevant module's docstring:
   itself is not renamed/widened to cover this (still only tests T/FI, per
   its docstring) but any code excluding "the unreliable species" by name
   should include `PT` alongside `T`/`FI` -- see `neural/train.py`'s
-  `excluded_temporal_channels` default.
+  `DEFAULT_EXCLUDED_TEMPORAL_CHANNELS` and `configs/continuous.yaml`'s
+  `data.excluded_temporal_channels`, both defaulting to `conc_T`,
+  `conc_PT`, `conc_FI` excluded (zero-weighted, still loaded/predicted for
+  diagnostics) from `train_continuous`'s per-point training loss. The grid
+  path's `train()` has no analogous mechanism -- it trains on all 11
+  channels unconditionally, so this caveat applies to its `[T]`/`[PT]`/
+  `[FI]` output channels unfiltered.
+- **The analytic wall-distance function only covers this project's
+  idealized geometries.** `mechanistic/geometry_sdf.py`'s closed-form
+  signed-distance-to-wall function (used by `CoordinateDecoder`'s SDF input
+  feature and the autograd physics residual's collocation-point sampling)
+  works by exploiting an exact algebraic description of the vessel+aneurysm
+  domain's boundary (a rectangle union a circular-arc sac). This is
+  specific to the idealized parametric shapes `mesh.py` generates -- it
+  does **not** generalize to patient-specific or otherwise arbitrary
+  geometries, which have no closed-form boundary to differentiate through.
+  Supporting such geometries would need a different, non-analytic domain
+  representation (e.g. a signed-distance field learned from or sampled
+  against an actual mesh/point cloud), not an extension of this function.
 - **No quantitative validation against the paper's reported results.**
   Fig. 4's ~120-minute thrombus height comparison is far outside what this
   project's demo-scale runs simulate (seconds, per the scale caveat above);
@@ -562,6 +708,50 @@ thrombus-benchmark --training-config configs/pilot.yaml --checkpoint checkpoints
 above). See `--help` on each command, or the corresponding module's
 `main()` in `src/thrombus_bench/{data,neural,benchmark}/`.
 
+### Run the continuous-surrogate pipeline (point-cloud, primary path)
+
+`configs/continuous.yaml` is the demo-scale config for the continuous
+model (`ContinuousThrombusSurrogate`) -- forked from `demo_cpu.yaml`
+rather than overloading it with continuous-specific keys, and smaller
+still (see that file's header comment: the point-cloud path checkpoints
+each sample multiple times, so a comparably-sized dataset costs more
+wall-clock time to generate than the raster path's final-checkpoint-only
+default).
+
+```bash
+# 1. Generate the dataset (point-cloud .npz by default -- add
+#    --also-save-raster too if you also want the 4th, grid-FNO comparison
+#    row in step 3 below):
+thrombus-generate-dataset --training-config configs/continuous.yaml \
+    --output-dir data/processed_continuous
+
+# 2. Train the continuous surrogate (--continuous selects train_continuous):
+thrombus-train --continuous --config configs/continuous.yaml \
+    --dataset-dir data/processed_continuous \
+    --checkpoint checkpoints/continuous_model.pt
+
+# 3. Run the benchmark, producing results/report_continuous.md + PNGs
+#    (add --grid-checkpoint <path> for the optional 4th comparison row --
+#    requires a separately-trained ThrombusSurrogate and a dataset
+#    generated with --also-save-raster):
+thrombus-benchmark --continuous --training-config configs/continuous.yaml \
+    --dataset-dir data/processed_continuous \
+    --checkpoint checkpoints/continuous_model.pt
+```
+
+**Interpreting the report's RMSE numbers:** `results/report_continuous.md`'s
+"Accuracy"/"Model comparison" sections use **point-query RMSE**
+(`benchmark.metrics.field_rmse_pointwise`) -- computed directly against
+each held-out simulation's own exact mesh node coordinates, no
+interpolation involved. If a `--grid-checkpoint` was given, its numbers
+appear in a separate "Legacy grid-projection FNO" section using the
+original **grid RMSE** (`field_rmse`, `griddata`-interpolated onto a fixed
+raster). **These two numbers are not directly comparable in magnitude** --
+they're computed against different ground truth (exact nodes vs.
+interpolated raster cells) -- only compare within one section, not across
+them (e.g. don't conclude the continuous model is more/less accurate than
+the FNO just because one number is larger than the other).
+
 ### Genuine-extrapolation evaluation (opt-in)
 
 The edge-of-domain holdout above is still drawn from the same sampled
@@ -582,6 +772,22 @@ thrombus-train --dataset-dir data/processed_extrap_heparin \
     --checkpoint checkpoints/model_extrap_heparin.pt
 
 python scripts/evaluate_extrapolation.py
+```
+
+A continuous-path counterpart (`evaluate_extrapolation_degradation_continuous`)
+exists too, via `scripts/evaluate_extrapolation_continuous.py` -- same
+prerequisite shape, using `--continuous`/`configs/continuous.yaml` for the
+generate/train steps:
+
+```bash
+thrombus-generate-dataset --extrapolation-param heparin_conc_uM \
+    --output-dir data/processed_extrap_heparin_continuous
+
+thrombus-train --continuous --config configs/continuous.yaml \
+    --dataset-dir data/processed_extrap_heparin_continuous \
+    --checkpoint checkpoints/continuous_model_extrap_heparin.pt
+
+python scripts/evaluate_extrapolation_continuous.py
 ```
 
 ### Run tests
@@ -611,6 +817,54 @@ pytest
 - `configs/ci_smoke.yaml`: an even smaller variant used only by
   `.github/workflows/ci.yml`'s end-to-end smoke test (not meant for
   interactive use).
+- `configs/continuous.yaml`: the demo-scale config for the continuous
+  surrogate (`ContinuousThrombusSurrogate`/`train_continuous`) -- forked
+  from `demo_cpu.yaml` rather than adding continuous-specific keys to it,
+  smaller still (see that file's own header comment). New keys beyond the
+  grid configs' shape:
+  - `data.n_snapshots`: checkpoints saved per sample by
+    `generate_dataset.py` (`_output_every_n_steps_for_snapshots`); `1`
+    reproduces the original final-checkpoint-only behavior. Also settable
+    via that CLI's `--n-snapshots`, which falls back to this value if not
+    passed explicitly.
+  - `data.points_per_sample`: `PointCloudThrombusDataset`'s random
+    per-checkpoint node subsample size (redrawn every access, not fixed at
+    dataset construction -- see that class's docstring); `null`/omitted
+    means "use every node."
+  - `data.excluded_temporal_channels`: `FIELD_NAMES` channel names
+    zero-weighted in `train_continuous`'s per-point data loss (still
+    loaded/predicted, just not optimized against) -- defaults to
+    `[conc_T, conc_PT, conc_FI]`, the species the concentration-cap QC
+    check found unreliable (see "Known limitations").
+  - `model.encoder.param_dim: 9`: the one required difference in the
+    shared-trunk config block vs. the grid path's `8` -- the existing 8
+    scalars plus normalized time.
+  - `model.coordinate_encoding.num_frequency_bands`: Phase 1's Fourier
+    positional encoding's `L` (`neural/coordinate_encoding.
+    DEFAULT_N_FREQUENCIES`, default `8` -- see that module's docstring for
+    the reasoning).
+  - `model.coordinate_decoder.mlp_hidden`/`n_residual_blocks`:
+    `CoordinateDecoder`'s MLP width/depth.
+  - `model.predict_M_at_wall`: same meaning as the grid config's key of the
+    same name (an opt-in extra output channel for `M_at`), but defaults to
+    `true` here (vs. `false` for the grid config) since this config exists
+    specifically to exercise the continuous path's features end to end.
+  - `physics_loss.residual_mode: autograd`: the only mode `train_continuous`
+    supports (`finite_difference` is grid-path-only); enables
+    `physics_losses.continuous_mass_conservation_loss`.
+  - `physics_loss.n_collocation_points`: PINN-style collocation points
+    sampled per training-batch sample for the autograd mass-conservation
+    residual (`physics_losses.sample_collocation_points`).
+  - `physics_loss.weights.mass_conservation`: same meaning as the grid
+    config's weight of the same name, applied to the autograd residual
+    instead of the finite-difference one.
+
+  `generate_dataset.py` also accepts `--also-save-raster` (CLI-only, not a
+  YAML key): additionally computes and saves the legacy rasterized
+  representation alongside the default point-cloud data, needed to produce
+  data `ThrombusSurrogateDataset`/the grid-projection baseline (or
+  `thrombus-benchmark --continuous --grid-checkpoint`) can consume. Off by
+  default since it's the expensive part (`griddata`/mask-building).
 
 ## Contributors
 
@@ -619,4 +873,4 @@ pytest
   calibration, and maintenance of the mechanistic solver, neural
   surrogate, and benchmark pipeline.
 
-_Last updated: 2026-07-21_
+_Last updated: 2026-07-25_
