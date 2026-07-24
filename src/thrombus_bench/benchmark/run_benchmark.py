@@ -29,6 +29,12 @@ End-to-end benchmark entrypoint:
    FNO is adding value over something trivial.
 4. Render plots via `viz/plots.py` and assemble a single Markdown + PNG
    bundle at `results/report.md`.
+
+`--continuous` dispatches instead to `benchmark_continuous_placeholder` --
+a minimal placeholder step for `ContinuousThrombusSurrogate` (`docs/
+continuous_surrogate_design.md` Phase 4: test-split loss only, no
+baselines/calibration/report). The full continuous rebuild mirroring 1-4
+above is Phase 6.
 """
 
 from __future__ import annotations
@@ -377,6 +383,56 @@ def _write_report(
         f.write("\n".join(lines))
 
 
+def benchmark_continuous_placeholder(cfg: dict, dataset_dir: str, checkpoint_path: str) -> dict:
+    """Placeholder benchmark step for `ContinuousThrombusSurrogate` (`docs/
+    continuous_surrogate_design.md` Phase 4) -- the real rebuild (accuracy/
+    edge-holdout/calibration/runtime comparison + report, mirroring
+    `run_benchmark` above) is Phase 6.
+
+    For now: load the checkpoint, evaluate `PointCloudThrombusDataset`'s
+    test split, and report the same masked-mean-MSE `neural.train.
+    train_continuous` logs as `val_loss` (reused directly, not
+    reimplemented, so this number is directly comparable to that training
+    run's own log) -- enough to confirm an end-to-end-trained checkpoint
+    actually predicts something on held-out data, not a real accuracy
+    benchmark (no baselines, no calibration, no report/plots).
+    """
+
+    from ..data.dataset import PointCloudThrombusDataset, pointcloud_collate_fn
+    from ..neural.coordinate_decoder import ContinuousThrombusSurrogate
+    from ..neural.train import DEFAULT_EXCLUDED_TEMPORAL_CHANNELS, _channel_weight_mask, _masked_mse
+
+    checkpoint = torch.load(checkpoint_path, weights_only=False)
+    model_cfg = checkpoint["cfg"]
+    model = ContinuousThrombusSurrogate(model_cfg)
+    model.load_state_dict(checkpoint["model_state"])
+    model.eval()
+
+    data_cfg = cfg["data"]
+    test_ds = PointCloudThrombusDataset(dataset_dir, "test", points_per_sample=data_cfg.get("points_per_sample"))
+    test_loader = DataLoader(
+        test_ds, batch_size=min(cfg["optim"]["batch_size"], len(test_ds)), collate_fn=pointcloud_collate_fn
+    )
+
+    predict_M_at_wall = bool(model_cfg.get("predict_M_at_wall", False))
+    excluded_channels = data_cfg.get("excluded_temporal_channels", list(DEFAULT_EXCLUDED_TEMPORAL_CHANNELS))
+    channel_weight = _channel_weight_mask(excluded_channels, predict_M_at_wall)
+
+    def _target(batch: dict) -> torch.Tensor:
+        if predict_M_at_wall:
+            return torch.cat([batch["fields"], batch["M_at_target"].unsqueeze(-1)], dim=-1)
+        return batch["fields"]
+
+    total_loss, n_batches = 0.0, 0
+    with torch.no_grad():
+        for batch in test_loader:
+            pred = model(batch["params_with_time"], batch["node_coords"], batch["batch_index"], batch["geometry_mm"])
+            total_loss += float(_masked_mse(pred, _target(batch), channel_weight))
+            n_batches += 1
+
+    return {"test_loss": total_loss / max(1, n_batches), "n_test_items": len(test_ds)}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--training-config", type=str, default="configs/demo_cpu.yaml")
@@ -386,10 +442,21 @@ def main() -> None:
     parser.add_argument("--dataset-dir", type=str, default="data/processed")
     parser.add_argument("--output-dir", type=str, default="results")
     parser.add_argument("--target-num-elements", type=int, default=800)
+    parser.add_argument(
+        "--continuous", action="store_true",
+        help="Run the placeholder ContinuousThrombusSurrogate benchmark step (benchmark_continuous_placeholder) "
+        "instead of the full grid-path run_benchmark -- see that function's docstring; real rebuild is Phase 6.",
+    )
     args = parser.parse_args()
 
     with open(args.training_config) as f:
         training_cfg = yaml.safe_load(f)
+
+    if args.continuous:
+        result = benchmark_continuous_placeholder(training_cfg, args.dataset_dir, args.checkpoint)
+        print(f"Continuous placeholder benchmark: {result}")
+        return
+
     with open(args.physio_config) as f:
         physio_base = yaml.safe_load(f)
     with open(args.geometry_config) as f:

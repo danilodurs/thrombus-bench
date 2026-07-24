@@ -92,6 +92,17 @@ class CoupledSimulationHistory:
     # `_count_clip_events`'s docstring for why cumulative rather than
     # final-step-only.
     clip_event_counts: dict = field(default_factory=lambda: {name: 0 for name in _ALL_SPECIES})
+    # Per-checkpoint counterpart of `thrombin_fibrin_reliable`, shape
+    # `(len(states),)`: entry `i` is whether the cap had *already* fired
+    # (for T or FI) at or before the time `states[i]` was recorded, so a
+    # multi-checkpoint run's early checkpoints (see `data.n_snapshots` in
+    # `data/generate_dataset.py`) can be trusted even if a later checkpoint
+    # in the same run trips the cap. `thrombin_fibrin_reliable` above is
+    # exactly `thrombin_fibrin_reliable_at_checkpoint[-1]` (whole-run
+    # summary = last checkpoint's value). Monotonic True -> False within a
+    # run, never False -> True, since the underlying cap check is a
+    # one-way, cumulative "has this ever fired" flag.
+    thrombin_fibrin_reliable_at_checkpoint: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=bool))
 
 
 def _thrombin_fibrin_cap_exceeded(new_concentrations: dict, concentration_cap: dict) -> bool:
@@ -285,6 +296,7 @@ def run_coupled_simulation(
     concentrations["T"] = np.zeros(basis_c.N)  # thrombin initial = 0 throughout, not just at inlet
     thrombin_fibrin_reliable = True
     clip_event_counts = {name: 0 for name in _ALL_SPECIES}
+    reliable_at_checkpoint: list[bool] = []
 
     top_branch, bottom_branch = _wall_branches(basis_c, vessel_diameter_m)
     wall_dofs = np.union1d(top_branch, bottom_branch)
@@ -461,7 +473,17 @@ def run_coupled_simulation(
             )
             flow = solve_steady_flow(tagged_mesh, inlet_velocity_m_s, carreau, thrombus_fields=thrombus_fields)
 
-        if step % output_every_n_steps == 0 or step == n_steps - 1:
+        # 1-indexed step count (`step + 1`), matching the
+        # `flow_resolve_every_n_steps` condition above: 0-indexing this
+        # (`step % output_every_n_steps == 0`) would make `step == 0`
+        # satisfy the modulo for *every* `output_every_n_steps` value (`0 %
+        # k == 0` for any `k`), spuriously recording an extra checkpoint
+        # right after the first macro step regardless of the requested
+        # cadence -- including whenever `output_every_n_steps == n_steps`
+        # (today's/`generate_dataset._output_every_n_steps_for_snapshots`'s
+        # "final-checkpoint-only" request), which would silently produce
+        # *two* checkpoints (step 0 and the final step) instead of one.
+        if (step + 1) % output_every_n_steps == 0 or step == n_steps - 1:
             history.states.append(
                 CoupledSimulationState(
                     time_s=t + dt_s,
@@ -474,7 +496,9 @@ def run_coupled_simulation(
                     wall_dofs=wall_dofs,
                 )
             )
+            reliable_at_checkpoint.append(thrombin_fibrin_reliable)
 
     history.thrombin_fibrin_reliable = thrombin_fibrin_reliable
     history.clip_event_counts = clip_event_counts
+    history.thrombin_fibrin_reliable_at_checkpoint = np.array(reliable_at_checkpoint, dtype=bool)
     return history

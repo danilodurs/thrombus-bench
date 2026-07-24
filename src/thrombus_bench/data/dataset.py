@@ -73,6 +73,17 @@ also exists as an opt-in alternative, written by `generate_dataset.
 generate_extrapolation_dataset` (`sampler.sample_with_extrapolation_holdout`)
 -- unlike edge-of-domain, genuinely never-seen-during-training parameter
 values for one chosen parameter; see `benchmark/extrapolation_eval.py`.
+
+`PointCloudThrombusDataset` + `pointcloud_collate_fn`
+----------------------------------------------------------
+The point-cloud counterpart of `ThrombusSurrogateDataset`, reading the
+node-native `.npz` schema `generate_dataset._build_pointcloud_sample`
+writes by default since Phase 3 (`docs/continuous_surrogate_design.md`) --
+see that function's docstring for the schema. Feeds `neural.
+coordinate_decoder.ContinuousThrombusSurrogate`; `ThrombusSurrogateDataset`
+above is unmodified and stays in use for the legacy grid-projection
+comparison baseline (which needs samples generated with
+`--also-save-raster`).
 """
 
 from __future__ import annotations
@@ -143,3 +154,196 @@ class ThrombusSurrogateDataset(Dataset):
             "fluid_mask": torch.from_numpy(data["fluid_mask"].astype(np.float32)),
             "M_at_wall": torch.from_numpy(field_to_log(data["M_at_wall"].astype(np.float32))),
         }
+
+
+class PointCloudThrombusDataset(Dataset):
+    """One item per `(sample, checkpoint)` pair -- see module docstring.
+
+    `__getitem__` returns, for a single checkpoint of a single sample:
+
+    * `params_with_time`: `(9,)` float32 -- the existing 8 parameters,
+      normalized exactly like `ThrombusSurrogateDataset` (`sampler.
+      normalize_params`, reused directly, not reimplemented), plus a
+      9th normalized-time scalar `t_norm = 2 * (t / t_final) - 1` where
+      `t_final` is *this sample's own* last saved checkpoint time
+      (`time_s[-1]`) -- the same min-max-to-`[-1, 1]` convention as the
+      other 8, just using each sample's own run duration as its range
+      rather than a shared physical scale (there is no single fixed
+      "maximum simulated time" across samples the way there is a fixed
+      physical range for e.g. `heparin_conc_uM`). Note `generate_dataset.
+      _output_every_n_steps_for_snapshots` never records a true `t=0`
+      checkpoint (see that function's docstring), so `t_norm` for a
+      multi-checkpoint sample's first entry is strictly greater than -1,
+      not exactly -1; for an `n_snapshots=1` sample it is always exactly
+      `+1` (the one checkpoint *is* the final time).
+    * `node_coords`: `(n_points, 2)` float32 -- that checkpoint's mesh
+      node coordinates (meters), or a random subsample of size
+      `points_per_sample` if that constructor argument is set and smaller
+      than the checkpoint's actual node count.
+    * `fields`: `(n_points, 11)` float32 -- field values at `node_coords`,
+      in `FIELD_NAMES` order, subsampled identically to `node_coords`
+      (same random indices). **Log-compressed** (`field_to_log`), same as
+      `ThrombusSurrogateDataset.fields` and for the same reason (see that
+      class's docstring) -- use `log_to_field` to invert.
+    * `M_at_target`: `(n_points,)` float32 -- `surface_ode.
+      SurfaceState.M_at` at each point, 0 for non-wall points (see
+      `generate_dataset._build_pointcloud_sample`'s `wall_dofs` field and
+      `docs/continuous_surrogate_design.md` Phase 4 "Finalized M_at design
+      choice") -- the training target for `ContinuousThrombusSurrogate`'s
+      optional 12th (`predict_M_at_wall`) output channel. Also
+      log-compressed (`field_to_log(0) == 0`, so the off-wall fill value
+      is unaffected).
+    * `is_wall`: `(n_points,)` bool -- which points are actual wall nodes
+      (kept alongside `M_at_target` for diagnostics; the training loss
+      itself does not need it, since 0 is already the correct off-wall
+      target -- mirrors `ThrombusSurrogateDataset`'s `M_at_wall` raster,
+      which is 0-filled off the wall band with no separate mask either).
+    * `geometry_mm`: `(2,)` float32 -- raw (unnormalized)
+      `[aneurysm_diameter_mm, vessel_diameter_mm]` for this sample (i.e.
+      `data["params"][:2]`, `PARAM_ORDER`'s first two entries) -- needed
+      by `neural.coordinate_decoder.ContinuousThrombusSurrogate` for its
+      analytic-SDF and coordinate-normalization terms, which require
+      physical geometry rather than `params_with_time`'s normalized form.
+    * `thrombin_fibrin_reliable`: bool scalar -- this checkpoint's entry
+      from `thrombin_fibrin_reliable_at_checkpoint` (Phase 1), for the
+      per-checkpoint channel-exclusion-by-default mechanism (`docs/
+      continuous_surrogate_design.md`'s "Channel-exclusion caveat").
+
+    Subsampling (`points_per_sample`) happens in `__getitem__`, using a
+    freshly-constructed `np.random.default_rng()` (no fixed seed) on every
+    call rather than an RNG stored on `self` -- this both re-draws a
+    different random subsample each epoch (a `self`-stored RNG advanced
+    once at construction would not) and is safe under a multi-worker
+    `DataLoader` (`np.random.default_rng()` with no seed pulls fresh OS
+    entropy per call, avoiding the classic bug where forked worker
+    processes inherit and share identical global RNG state).
+    """
+
+    def __init__(
+        self,
+        dataset_dir: str,
+        split: Literal["train", "val", "test", "edge_holdout", "extrapolation"],
+        points_per_sample: int | None = None,
+    ):
+        self.dataset_dir = dataset_dir
+        self.split = split
+        self.points_per_sample = points_per_sample
+        self.files = sorted(glob.glob(os.path.join(dataset_dir, split, "sample_*.npz")))
+        if not self.files:
+            raise FileNotFoundError(f"No samples found in {os.path.join(dataset_dir, split)}")
+        self.param_space = ParameterSpace()
+
+        # (file_idx, checkpoint_idx) for every checkpoint of every sample --
+        # only `time_s` (tiny) is read per file here, not `node_coords`/
+        # `fields`, to keep dataset construction cheap.
+        self._index: list[tuple[int, int]] = []
+        for file_idx, path in enumerate(self.files):
+            with np.load(path) as data:
+                n_snapshots = data["time_s"].shape[0]
+            self._index.extend((file_idx, checkpoint_idx) for checkpoint_idx in range(n_snapshots))
+
+    def __len__(self) -> int:
+        return len(self._index)
+
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+        file_idx, checkpoint_idx = self._index[idx]
+        data = np.load(self.files[file_idx])
+
+        params_raw = data["params"]
+        params_normalized = normalize_params(params_raw, self.param_space).astype(np.float32)
+        time_s = data["time_s"]
+        t_norm = np.float32(2.0 * (time_s[checkpoint_idx] / time_s[-1]) - 1.0)
+        params_with_time = np.concatenate([params_normalized, [t_norm]]).astype(np.float32)
+
+        node_coords = data["node_coords"].astype(np.float32)
+        # Log-compressed (field_to_log: sign(x) * log1p(|x|)), same as
+        # ThrombusSurrogateDataset's `fields` -- raw field magnitudes span
+        # ~20 orders of magnitude across channels (see that class's
+        # docstring), which otherwise makes a plain per-point MSE loss
+        # dominated entirely by the largest-magnitude channel(s) (e.g.
+        # platelet concentrations ~1e8) with near-zero effective gradient
+        # for the rest; confirmed empirically running train_continuous
+        # without this (loss was completely flat across 10 epochs).
+        fields = field_to_log(data["fields"][checkpoint_idx].astype(np.float32))
+
+        # M_at (surface_ode.SurfaceState.M_at) as a 12th per-point target,
+        # 0-filled off the wall -- see docs/continuous_surrogate_design.md
+        # Phase 4 "Finalized M_at design choice": wall_dofs are indices
+        # into these same bulk node_coords/fields (not a separate
+        # geometric point set), so this needs no extra query points, just
+        # a target array the training loop concatenates as channel 12
+        # when `model.predict_M_at_wall` is set (mirroring
+        # ThrombusSurrogate's existing plain-MSE, 0-filled-off-wall
+        # convention for the same quantity on the raster path). Also
+        # log-compressed (field_to_log(0) == 0, so the off-wall fill value
+        # is unaffected).
+        n_nodes = node_coords.shape[0]
+        wall_dofs = data["wall_dofs"]
+        m_at_target = np.zeros(n_nodes, dtype=np.float32)
+        m_at_target[wall_dofs] = data["M_at_wall_values"][checkpoint_idx]
+        m_at_target = field_to_log(m_at_target)
+        is_wall = np.zeros(n_nodes, dtype=bool)
+        is_wall[wall_dofs] = True
+
+        if self.points_per_sample is not None and self.points_per_sample < n_nodes:
+            rng = np.random.default_rng()
+            chosen = rng.choice(n_nodes, size=self.points_per_sample, replace=False)
+            node_coords = node_coords[chosen]
+            fields = fields[chosen]
+            m_at_target = m_at_target[chosen]
+            is_wall = is_wall[chosen]
+
+        geometry_mm = params_raw[:2].astype(np.float32)
+        reliable = bool(data["thrombin_fibrin_reliable_at_checkpoint"][checkpoint_idx])
+
+        return {
+            "params_with_time": torch.from_numpy(params_with_time),
+            "node_coords": torch.from_numpy(node_coords),
+            "fields": torch.from_numpy(fields),
+            "M_at_target": torch.from_numpy(m_at_target),
+            "is_wall": torch.from_numpy(is_wall),
+            "geometry_mm": torch.from_numpy(geometry_mm),
+            "thrombin_fibrin_reliable": torch.tensor(reliable, dtype=torch.bool),
+        }
+
+
+def pointcloud_collate_fn(batch: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
+    """Custom `collate_fn` for `PointCloudThrombusDataset`, implementing
+    the flat-points + `batch_index` ragged-batching convention from
+    `neural.coordinate_decoder.py` (see that module's docstring) --
+    PyTorch's default collation requires every sample's tensors to already
+    share the same shape, which different samples' (generally different)
+    node counts violate.
+
+    Returns `params_with_time`/`geometry_mm`/`thrombin_fibrin_reliable`
+    stacked to `(batch, ...)` as usual, and `node_coords`/`fields`/
+    `M_at_target`/`is_wall` concatenated to flat `(total_points, ...)`
+    tensors plus a `batch_index: (total_points,)` long tensor mapping each
+    point back to its sample's position in the batch -- directly
+    consumable as `ContinuousThrombusSurrogate.forward`'s
+    `query_points_m`/`batch_index` (with `fields`/`M_at_target` as the
+    training targets at those same points).
+    """
+
+    params_with_time = torch.stack([item["params_with_time"] for item in batch], dim=0)
+    geometry_mm = torch.stack([item["geometry_mm"] for item in batch], dim=0)
+    thrombin_fibrin_reliable = torch.stack([item["thrombin_fibrin_reliable"] for item in batch], dim=0)
+
+    node_coords = torch.cat([item["node_coords"] for item in batch], dim=0)
+    fields = torch.cat([item["fields"] for item in batch], dim=0)
+    m_at_target = torch.cat([item["M_at_target"] for item in batch], dim=0)
+    is_wall = torch.cat([item["is_wall"] for item in batch], dim=0)
+    batch_index = torch.cat(
+        [torch.full((item["node_coords"].shape[0],), i, dtype=torch.long) for i, item in enumerate(batch)]
+    )
+
+    return {
+        "params_with_time": params_with_time,
+        "geometry_mm": geometry_mm,
+        "thrombin_fibrin_reliable": thrombin_fibrin_reliable,
+        "node_coords": node_coords,
+        "fields": fields,
+        "M_at_target": m_at_target,
+        "is_wall": is_wall,
+        "batch_index": batch_index,
+    }

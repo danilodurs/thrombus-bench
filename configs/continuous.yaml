@@ -1,0 +1,123 @@
+# CONTINUOUS-SURROGATE DEMO / PIPELINE SMOKE TEST -- NOT A BENCHMARK.
+# Forked from demo_cpu.yaml for the point-cloud / coordinate-decoder
+# architecture (docs/continuous_surrogate_design.md) rather than adding
+# continuous-specific keys onto the grid-based configs (demo_cpu.yaml/
+# pilot.yaml stay exactly as they are, for ThrombusSurrogate/
+# ThrombusSurrogateDataset).
+#
+# Use with:
+#   thrombus-generate-dataset --training-config configs/continuous.yaml \
+#       --output-dir data/processed_continuous
+#   thrombus-train --continuous --config configs/continuous.yaml \
+#       --dataset-dir data/processed_continuous \
+#       --checkpoint checkpoints/continuous_model.pt --log runs/continuous_train_log.csv
+#
+# Sample counts here are smaller than demo_cpu.yaml's already-minimal
+# 24/6/6/6: the point-cloud path checkpoints each sample `data.n_snapshots`
+# times (more flow-resolves per sample than the raster path's
+# final-checkpoint-only default -- see generate_dataset.py's docstring and
+# the Phase 3 timing note in docs/continuous_surrogate_design.md), so a
+# comparably-sized dataset costs more wall-clock time to generate.
+
+seed: 0
+
+data:
+  dataset_dir: data/processed_continuous
+  n_train: 6
+  n_val: 3
+  n_test: 3
+  n_edge_holdout: 3
+  edge_holdout_quantile: 0.9
+
+  # Checkpoints saved per sample (generate_dataset.py's
+  # _output_every_n_steps_for_snapshots; also settable via that CLI's
+  # --n-snapshots, which falls back to this value if not passed
+  # explicitly). 1 reproduces final-checkpoint-only behavior.
+  n_snapshots: 3
+
+  # PointCloudThrombusDataset.__getitem__: random subsample of each
+  # checkpoint's mesh nodes, redrawn every access (see that class's
+  # docstring) -- keeps batches a manageable, fixed-ish size despite
+  # different samples' meshes having different node counts. null/omitted
+  # means "use every node."
+  points_per_sample: 64
+
+  # Species excluded from train_continuous's per-point data loss (still
+  # loaded/predicted, just zero-weighted) -- see neural/train.py's
+  # DEFAULT_EXCLUDED_TEMPORAL_CHANNELS and README.md "Known limitations"
+  # for why: the concentration cap binds for these in 100% of a checked
+  # 18-sample QC sweep (docs/continuous_surrogate_design.md Phase 4),
+  # unlike every other species (0%).
+  excluded_temporal_channels: [conc_T, conc_PT, conc_FI]
+
+model:
+  # param_dim=9: the existing 8 (data/generate_dataset.PARAM_ORDER) +
+  # normalized time -- see docs/continuous_surrogate_design.md. This is
+  # the one required difference from demo_cpu.yaml's encoder block
+  # (param_dim=8); everything else here is the shared Stage 1 backbone
+  # (neural/model.SurrogateBackbone) with the same meaning as there.
+  encoder:
+    param_dim: 9
+    latent_grid_size: [32, 32]
+    hidden_channels: 32
+    n_layers: 2
+
+  operator_core:
+    type: fno
+    fno:
+      modes: 8
+      hidden_channels: 32
+      n_layers: 3
+
+  # Stage 2 (neural/coordinate_decoder.py), new for the continuous path.
+  coordinate_encoding:
+    num_frequency_bands: 8   # neural/coordinate_encoding.DEFAULT_N_FREQUENCIES; see that module's docstring
+  coordinate_decoder:
+    mlp_hidden: 128
+    n_residual_blocks: 3
+
+  # Physical field channels, matching data/dataset.FIELD_NAMES (same as
+  # demo_cpu.yaml's model.output_channels).
+  output_channels: 11
+
+  # 12th output channel predicting M_at (surface_ode.SurfaceState.M_at) at
+  # wall query points, 0 elsewhere -- see docs/continuous_surrogate_design.md
+  # Phase 4 "Finalized M_at design choice." Default true here (unlike
+  # demo_cpu.yaml's `false`) since this config exists specifically to
+  # exercise the continuous path end-to-end, including this feature.
+  predict_M_at_wall: true
+
+  uncertainty:
+    method: deep_ensemble
+    n_ensemble_members: 3
+    mc_dropout_rate: 0.1
+    mc_dropout_n_samples: 30
+
+physics_loss:
+  # train_continuous only supports residual_mode: autograd (see that
+  # function and physics_losses.py's module docstring) -- PINN-style
+  # collocation-point mass-conservation residual via torch.autograd.grad
+  # on ContinuousThrombusSurrogate's own continuous output (Phase 5).
+  # nonnegativity has no continuous-path counterpart yet.
+  enabled: true
+  residual_mode: autograd
+  n_collocation_points: 24   # per sample, per training step -- see sample_collocation_points
+  weights:
+    data: 1.0
+    mass_conservation: 0.01   # small: this is a soft regularizer, not a hard constraint
+
+optim:
+  epochs: 10   # smaller than demo_cpu.yaml's 40 -- see the sample-count note above
+  batch_size: 4
+  lr: 3.0e-4
+  weight_decay: 1.0e-5
+  optimizer: adamw
+  lr_schedule: cosine
+  grad_clip_norm: 1.0
+  early_stopping_patience: 20
+
+logging:
+  backend: csv
+  log_dir: runs/
+  checkpoint_dir: checkpoints/
+  log_every_n_steps: 10

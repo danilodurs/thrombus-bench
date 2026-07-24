@@ -15,6 +15,15 @@ backbones, selected via `configs/training.yaml` `model.operator_core.type`:
   is exercised end-to-end by `train.py`/`run_benchmark.py`; the GNN path is
   left as a documented extension point -- `build_operator_core` raises
   `NotImplementedError` for `type: "gnn"`).
+
+`build_operator_core` returns a full backbone+projection-head module
+(`FourierNeuralOperator`), used by the legacy grid-projection surrogate
+(`neural/model.ThrombusSurrogate`). `build_operator_backbone` returns just
+the trunk (`FNOBackbone`, no head) for the continuous-surrogate path's
+shared Stage 1 backbone (`neural/model.SurrogateBackbone`) -- see
+`docs/continuous_surrogate_design.md`. `FourierNeuralOperator` is itself
+built from an `FNOBackbone` plus a projection head, so the block
+implementation exists in exactly one place either way.
 """
 
 from __future__ import annotations
@@ -65,14 +74,36 @@ class FNOBlock(nn.Module):
         return self.act(self.spectral(x) + self.pointwise(x))
 
 
+class FNOBackbone(nn.Module):
+    """FNO trunk only: the spectral+pointwise block stack, with no final
+    output-channel projection.
+
+    This is Stage 1's operator-core half in the continuous-surrogate design
+    (`docs/continuous_surrogate_design.md`) -- both the legacy
+    grid-projection `FourierNeuralOperator` below (which adds a projection
+    head on top) and the new coordinate-decoder path's
+    `neural/model.SurrogateBackbone` are built from this same class, so the
+    block implementation exists in exactly one place regardless of which
+    head consumes its `(batch, hidden_channels, H, W)` output.
+    """
+
+    def __init__(self, modes: int, hidden_channels: int, n_layers: int):
+        super().__init__()
+        self.hidden_channels = hidden_channels
+        self.blocks = nn.Sequential(*[FNOBlock(hidden_channels, modes) for _ in range(n_layers)])
+
+    def forward(self, latent_grid: torch.Tensor) -> torch.Tensor:
+        return self.blocks(latent_grid)
+
+
 class FourierNeuralOperator(nn.Module):
     def __init__(self, modes: int, hidden_channels: int, n_layers: int, out_channels: int):
         super().__init__()
-        self.blocks = nn.Sequential(*[FNOBlock(hidden_channels, modes) for _ in range(n_layers)])
+        self.backbone = FNOBackbone(modes, hidden_channels, n_layers)
         self.head = nn.Conv2d(hidden_channels, out_channels, kernel_size=1)
 
     def forward(self, latent_grid: torch.Tensor) -> torch.Tensor:
-        return self.head(self.blocks(latent_grid))
+        return self.head(self.backbone(latent_grid))
 
 
 class GraphOperator(nn.Module):
@@ -98,4 +129,22 @@ def build_operator_core(cfg: dict, out_channels: int) -> nn.Module:
         return FourierNeuralOperator(out_channels=out_channels, **cfg["fno"])
     if cfg["type"] == "gnn":
         return GraphOperator(out_channels=out_channels, **cfg["gnn"])
+    raise ValueError(f"Unknown operator_core.type: {cfg['type']!r}")
+
+
+def build_operator_backbone(cfg: dict) -> nn.Module:
+    """Stage-1-only counterpart of `build_operator_core`: the FNO trunk
+    with no output projection (`FNOBackbone`), for callers that only need
+    the shared latent feature grid (`neural/model.SurrogateBackbone`).
+    Never allocates an unused projection head, unlike calling
+    `build_operator_core(cfg, out_channels=hidden_channels)` and discarding
+    its head would."""
+
+    if cfg["type"] == "fno":
+        return FNOBackbone(**cfg["fno"])
+    if cfg["type"] == "gnn":
+        raise NotImplementedError(
+            "operator_core.build_operator_backbone: gnn backbone not implemented (see GraphOperator docstring); "
+            "use configs/training.yaml model.operator_core.type=fno"
+        )
     raise ValueError(f"Unknown operator_core.type: {cfg['type']!r}")

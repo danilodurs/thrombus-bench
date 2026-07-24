@@ -59,7 +59,10 @@ def test_run_one_sample_includes_qc_fields(physio):
 
 def test_dataset_exposes_qc_fields_matching_saved_sample(physio, tmp_path):
     mesh_cfg = {"target_num_elements": 150}
-    result = _run_one_sample(_small_sample(), physio, mesh_cfg, end_time_s=0.2, dt_s=0.1, grid_size=(8, 8))
+    # ThrombusSurrogateDataset needs the legacy raster representation.
+    result = _run_one_sample(
+        _small_sample(), physio, mesh_cfg, end_time_s=0.2, dt_s=0.1, grid_size=(8, 8), also_save_raster=True
+    )
 
     split_dir = tmp_path / "train"
     split_dir.mkdir()

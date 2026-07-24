@@ -80,7 +80,9 @@ def test_run_one_sample_m_at_wall_forms_a_band(physio):
     cells (the wall band) -- not uniformly one or the other."""
 
     mesh_cfg = {"target_num_elements": 150}
-    result = _run_one_sample(_small_sample(), physio, mesh_cfg, end_time_s=0.2, dt_s=0.1, grid_size=(16, 16))
+    result = _run_one_sample(
+        _small_sample(), physio, mesh_cfg, end_time_s=0.2, dt_s=0.1, grid_size=(16, 16), also_save_raster=True
+    )
 
     m_at_wall = result["M_at_wall"]
     assert m_at_wall.shape == (16, 16)
@@ -92,7 +94,9 @@ def test_run_one_sample_m_at_wall_forms_a_band(physio):
 
 def test_dataset_exposes_m_at_wall_log_compressed(physio, tmp_path):
     mesh_cfg = {"target_num_elements": 150}
-    result = _run_one_sample(_small_sample(), physio, mesh_cfg, end_time_s=0.2, dt_s=0.1, grid_size=(16, 16))
+    result = _run_one_sample(
+        _small_sample(), physio, mesh_cfg, end_time_s=0.2, dt_s=0.1, grid_size=(16, 16), also_save_raster=True
+    )
 
     split_dir = tmp_path / "train"
     split_dir.mkdir()

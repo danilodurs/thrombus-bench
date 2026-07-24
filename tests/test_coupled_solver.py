@@ -45,6 +45,26 @@ def test_coupled_simulation_runs_and_stays_bounded(physio):
     assert last.flow.converged
 
 
+def test_output_every_n_steps_equal_to_n_steps_records_exactly_one_checkpoint(physio):
+    """Regression guard for a fixed off-by-one: `output_every_n_steps ==
+    n_steps` (the "final-checkpoint-only" request `generate_dataset.
+    _output_every_n_steps_for_snapshots` makes for `n_snapshots<=1`) must
+    record exactly one checkpoint, not two. Before the fix, `step %
+    output_every_n_steps == 0` was always true at `step == 0` regardless
+    of the stride (`0 % k == 0` for any `k`), so this spuriously recorded
+    an extra checkpoint right after the first macro step in addition to
+    the final one."""
+
+    tm = build_channel_mesh(50.0, 4.0, target_num_elements=150)
+    n_steps = 3
+    history = run_coupled_simulation(
+        tm, inlet_velocity_m_s=0.47, physio=physio,
+        end_time_s=n_steps * 0.1, dt_s=0.1, output_every_n_steps=n_steps, flow_resolve_every_n_steps=n_steps,
+    )
+    assert len(history.states) == 1
+    assert history.states[0].time_s == pytest.approx(n_steps * 0.1)
+
+
 def test_coupled_simulation_platelets_stay_near_inlet_scale(physio):
     """Resting/activated platelets should stay within a modest factor of
     their inlet concentration -- a basic physical plausibility check (they
@@ -79,6 +99,27 @@ def test_coupled_simulation_reports_thrombin_fibrin_reliable_flag(physio):
     )
     assert isinstance(history.thrombin_fibrin_reliable, bool)
     assert history.thrombin_fibrin_reliable is False
+
+
+def test_thrombin_fibrin_reliable_at_checkpoint_is_monotonic_and_matches_final_flag(physio):
+    """`CoupledSimulationHistory.thrombin_fibrin_reliable_at_checkpoint` (new
+    per-checkpoint tracking, see that field's docstring) should have one
+    entry per recorded checkpoint, only ever transition True -> False
+    (never back), and its last entry should equal the whole-run
+    `thrombin_fibrin_reliable` summary flag."""
+
+    tm = build_channel_mesh(50.0, 4.0, target_num_elements=150)
+    history = run_coupled_simulation(
+        tm, inlet_velocity_m_s=0.47, physio=physio,
+        end_time_s=0.3, dt_s=0.1, output_every_n_steps=1, flow_resolve_every_n_steps=3,
+    )
+    flags = history.thrombin_fibrin_reliable_at_checkpoint
+    assert flags.dtype == bool
+    assert flags.shape == (len(history.states),)
+    # Monotonic non-increasing when read as 1/0 (True=1, False=0): no
+    # False -> True transition anywhere.
+    assert np.all(np.diff(flags.astype(int)) <= 0)
+    assert bool(flags[-1]) == history.thrombin_fibrin_reliable
 
 
 @pytest.mark.parametrize(

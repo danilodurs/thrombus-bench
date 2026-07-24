@@ -426,7 +426,19 @@ relevant module's docstring:
   against a reference implementation this project does not have access to
   -- but downstream training/evaluation code can now filter or weight
   samples by `thrombin_fibrin_reliable` instead of silently trusting capped
-  values.
+  values. **`[PT]` (prothrombin) is affected too, not just `[T]`/`[FI]`**:
+  checking actual `clip_count_*` QC data across 18 LHS-sampled runs
+  (`docs/continuous_surrogate_design.md` Phase 4) found the concentration
+  cap binds for `PT` in 100% of samples, identically to `T`/`FI` -- and
+  never for `RP`/`AP`/`APR`/`APS`/`AT`/`FG` in that same check. This is
+  mechanistically consistent with the root cause above: PT is the
+  substrate consumed by the same uncalibrated C.5-C.6 thrombin-generation
+  pathway (`j_pt_chem_si` in `coupled_solver.py`), so its runaway
+  consumption tracks T's runaway generation. `thrombin_fibrin_reliable`
+  itself is not renamed/widened to cover this (still only tests T/FI, per
+  its docstring) but any code excluding "the unreliable species" by name
+  should include `PT` alongside `T`/`FI` -- see `neural/train.py`'s
+  `excluded_temporal_channels` default.
 - **No quantitative validation against the paper's reported results.**
   Fig. 4's ~120-minute thrombus height comparison is far outside what this
   project's demo-scale runs simulate (seconds, per the scale caveat above);
