@@ -16,6 +16,39 @@ with the paper's figures is not a project goal; qualitative behavior
 (shear-gradient-driven platelet aggregation, thrombus localization near the
 distal neck, viscosity feedback) is.
 
+## Gallery
+
+Both figures below are genuine renderings of this project's own solver
+output (`scripts/generate_readme_figures.py`), not schematic artwork or
+paper figures — see the caveats under each.
+
+![Idealized 2D vessel + aneurysm geometries, mesh-quality colored, for both paper presets plus one asymmetric variant](docs/figures/geometry_gallery.png)
+
+The two idealized 2D vessel+aneurysm domains matching the paper's
+experimental geometries (`aneurysm_7mm`, `aneurysm_10mm`), meshed by this
+project's self-contained Delaunay mesher (see "Solver backend" below), plus
+one illustrative asymmetric half-ellipse sac (the geometry-redesign
+extension, `docs/geometry_redesign_assessment.md`) — **not a third paper
+preset**, just a demonstration that sac height/asymmetry are now
+independently configurable. Color is minimum triangle interior angle, a
+standard mesh-quality diagnostic; insets zoom the proximal/distal neck,
+the most refined and most failure-prone region.
+
+![Steady Stokes flow field on the aneurysm_7mm preset: streamlines, vorticity, and wall traction magnitude](docs/figures/flow_field_gallery.png)
+
+Streamlines, vorticity, and wall traction magnitude for a steady,
+Carreau-viscosity **Stokes** flow solve (`aneurysm_7mm` preset) — the
+recirculation zone inside the sac and the resulting axial wall
+shear-rate gradient are what the shear-gradient-gated mechanical
+aggregation mechanism (below) actually responds to. This is the
+**inertialess Stokes limit, not the full unsteady Navier-Stokes** the
+paper solves (Reynolds number ~455-908 in the paper's own units — see
+"Assumptions & Deviations" item 1 and `docs/navier_stokes_assessment.md`
+for why this project keeps that simplification). No thrombus/clot
+boundary is solved or shown here — platelet coverage and fibrin fields
+elsewhere in this project are wall-only vs. bulk quantities respectively,
+never a moving clot geometry (see "Known limitations" below).
+
 ## Project status
 
 The full pipeline (mesh → mechanistic solver → dataset generation → neural
@@ -35,8 +68,8 @@ prototype -- see the size caveats below and "Known limitations".
 | `neural/encoder.py`, `operator_core.py`, `model.py`, `coordinate_decoder.py`, `train.py` | **Implemented & tested.** FiLM-conditioned encoder + a real (if small) Fourier Neural Operator, now factored into a shared trunk (`SurrogateBackbone`) feeding either the original `Conv2d` grid-projection head (`ThrombusSurrogate`, kept as a comparison baseline) or the new `CoordinateDecoder` head (`ContinuousThrombusSurrogate`, primary path) -- see "The coordinate-decoder design" below. `operator_core.type: gnn` is still a documented, deliberately-unimplemented extension point. `train.py` has both `train` (grid) and `train_continuous` (point-cloud, including the optional autograd physics-loss term and per-checkpoint species channel-exclusion) loops. |
 | `neural/physics_losses.py` | **Partially implemented, more so than before.** `mass_conservation` (both `finite_difference`, for the grid path, and now a real `autograd` mode -- `mass_conservation_penalty_autograd` + `sample_collocation_points` + `continuous_mass_conservation_loss`, PINN-style, for the continuous path) and `nonnegativity` (finite-difference only) are implemented. `cdr_residual` and `surface_flux_bc_residual` remain unimplemented -- Phase 5 assessed `cdr_residual` for the concentration-cap-unaffected species (RP/AP/APR/APS) as more tractable than previously assumed (their reaction terms turn out to be decoupled from the unreliable T/PT/FI pathway) but still real additional scope (autograd through the whole encoder for `d/dt`, a differentiable bulk shear-rate port, per-species Laplacians), so it was deliberately deferred rather than built; see that module's docstring. |
 | `neural/uncertainty.py` | **Implemented & tested.** MC-dropout and deep-ensemble wrappers; confirmed (not just assumed) to work unmodified with `ContinuousThrombusSurrogate`'s multi-argument forward signature, since both wrap `forward()` generically. |
-| `benchmark/metrics.py`, `edge_holdout_eval.py`, `extrapolation_eval.py`, `calibration.py`, `run_benchmark.py` | **Implemented & tested.** Field RMSE (`field_rmse`, grid) and its point-query counterparts (`field_rmse_pointwise`, `field_rmse_by_checkpoint`, `field_rmse_by_distance_to_wall` -- the last one new: RMSE binned by distance to the nearest wall, directly answering whether near-wall accuracy is worse than bulk accuracy), edge-of-domain degradation, genuine-extrapolation degradation (opt-in, `scripts/evaluate_extrapolation.py`/`evaluate_extrapolation_continuous.py`) -- each with a grid and a continuous counterpart function -- UQ calibration (reliability diagram + ECE, works unchanged for both model families), runtime comparison, a `bootstrap_metric_by_sample` utility (resamples whole `sample_id`s, not individual points/checkpoints -- no bootstrap CI code existed before this, so this is a pre-emptive correctness guardrail, not a fix), and Markdown+PNG report generation for both the grid path (`run_benchmark`, `results/report.md`) and the continuous path (`run_benchmark_continuous`, `results/report_continuous.md`, with an optional 4th grid-FNO comparison row). `thrombus_height_error`/`time_to_onset_error`/`physics_residual_audit` remain unimplemented (the point-cloud path's full per-checkpoint spatial fields could plausibly support the first two now, but that's unassessed, separate work -- see `metrics.py` docstring). |
-| `viz/plots.py`, `viz/rasterize_continuous.py` | **Implemented.** `rasterize_continuous_model` (new) queries a trained `ContinuousThrombusSurrogate` on a regular grid over the analytic bounding box (masking exterior cells via `geometry_sdf.py`) purely for display, so grid-style plots remain possible without the model itself being grid-based. |
+| `benchmark/metrics.py`, `edge_holdout_eval.py`, `extrapolation_eval.py`, `calibration.py`, `run_benchmark.py` | **Implemented & tested.** Field RMSE (`field_rmse`, grid) and its point-query counterparts (`field_rmse_pointwise`, `field_rmse_by_checkpoint`, `field_rmse_by_distance_to_wall` -- RMSE binned by distance to the nearest wall, directly answering whether near-wall accuracy is worse than bulk accuracy; now surfaced in `run_benchmark_continuous`'s report as `report_continuous.md`'s "Accuracy vs. distance to wall" table + bar chart, using the analytic SDF at each query point's own sample geometry), `thrombus_mask`/`thrombus_iou` (thrombosed-region mask IoU, surfaced in both `run_benchmark`/`run_benchmark_continuous`'s "Thrombosed-region overlap" section whenever a checkpoint was trained with `model.predict_M_at_wall: true`), edge-of-domain degradation, genuine-extrapolation degradation (opt-in, `scripts/evaluate_extrapolation.py`/`evaluate_extrapolation_continuous.py`) -- each with a grid and a continuous counterpart function -- UQ calibration (reliability diagram + ECE, works unchanged for both model families), runtime comparison, a `bootstrap_metric_by_sample` utility (resamples whole `sample_id`s, not individual points/checkpoints -- no bootstrap CI code existed before this, so this is a pre-emptive correctness guardrail, not a fix), and Markdown+PNG report generation for both the grid path (`run_benchmark`, `results/report.md`) and the continuous path (`run_benchmark_continuous`, `results/report_continuous.md`, with an optional 4th grid-FNO comparison row). `thrombus_height_error`/`time_to_onset_error`/`physics_residual_audit` remain unimplemented (the point-cloud path's full per-checkpoint spatial fields could plausibly support the first two now, but that's unassessed, separate work -- see `metrics.py` docstring). |
+| `viz/plots.py`, `viz/rasterize_continuous.py`, `viz/field_interpolation.py`, `viz/showcase_plots.py` | **Implemented & tested.** `rasterize_continuous_model` queries a trained `ContinuousThrombusSurrogate` on a regular grid over the analytic bounding box (masking exterior cells via `geometry_sdf.py`) purely for display, so grid-style plots remain possible without the model itself being grid-based; `grid_size_for_aspect_ratio` derives that grid's resolution from a sample's own physical aspect ratio, independent of `configs/*.yaml`'s (training-time) `latent_grid_size`. `viz/plots.py` remains the original diagnostic-style renderer used by `run_benchmark.py`'s report, unmodified. `viz/field_interpolation.py` (new) is presentation-support with no `Basis`/`Mesh` dependency: `interpolate_velocity_to_grid`/`vorticity_from_grid` (`griddata`-based, for streamplots), `rasterize_reference_on_grid` (pixel-aligned mechanistic-vs-surrogate comparison), `triangle_min_angles_deg` (mesh quality). `viz/showcase_plots.py` (new) holds publication-facing figures built from those arrays plus `mechanistic/flow_solver.py`'s new `vorticity`/`wall_traction` FEM postprocessing -- velocity quiver, wall traction map, streamlines, vorticity, pressure, wall-band `M_at`, bulk-field renderer, mesh quality with a neck inset -- kept file-separate from `viz/plots.py`'s diagnostic style. Both new modules are used by both notebooks (mechanistic output in notebook 1, surrogate output pointed at the same, unmodified functions in notebook 2). |
 
 Run `pytest` — the full suite passes (mechanistic solver verification
 against analytical/sanity cases, surface ODE unit tests, species transport,
