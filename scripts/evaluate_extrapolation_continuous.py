@@ -33,7 +33,8 @@ import argparse
 import torch
 
 from thrombus_bench.benchmark.extrapolation_eval import evaluate_extrapolation_degradation_continuous
-from thrombus_bench.data.dataset import PointCloudThrombusDataset
+from thrombus_bench.benchmark.run_benchmark import _FieldChannelsOnly
+from thrombus_bench.data.dataset import FIELD_NAMES, PointCloudThrombusDataset
 from thrombus_bench.data.generate_dataset import DEFAULT_EXTRAPOLATION_TRAIN_FRACTION
 from thrombus_bench.data.sampler import DEFAULT_RANGES
 from thrombus_bench.neural.coordinate_decoder import ContinuousThrombusSurrogate
@@ -60,6 +61,11 @@ def main() -> None:
     model = ContinuousThrombusSurrogate(checkpoint["cfg"])
     model.load_state_dict(checkpoint["model_state"])
     model.eval()
+    if checkpoint["cfg"].get("predict_M_at_wall", False):
+        # Same slicing run_benchmark_continuous applies -- otherwise a
+        # predict_M_at_wall checkpoint's extra channel breaks
+        # field_rmse_pointwise's shape match against `batch["fields"]`.
+        model = _FieldChannelsOnly(model, len(FIELD_NAMES))
 
     test_ds = PointCloudThrombusDataset(args.dataset_dir, "test")
     extrapolation_ds = PointCloudThrombusDataset(args.dataset_dir, "extrapolation")
