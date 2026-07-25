@@ -64,11 +64,40 @@ MM_TO_M = 1.0e-3
 
 @dataclass
 class GeometryConfig:
-    """Vessel/aneurysm dimensions, in millimeters (as in configs/geometry.yaml)."""
+    """Vessel/aneurysm dimensions, in millimeters (as in configs/geometry.yaml).
+
+    ``sac_height_mm``/``sac_asymmetry`` (optional, geometry-redesign Phase
+    4b -- see ``docs/geometry_redesign_assessment.md``) generalize the sac
+    from a plain semicircle to an asymmetric half-ellipse: two quarter-
+    ellipse arcs (independent horizontal semi-axes ``a_left``/``a_right``,
+    shared vertical semi-axis ``b``) meeting at a single apex, still
+    attached to the vessel top wall at exactly the same two neck points
+    (``xc +/- R``) a plain circle would use -- see
+    ``_aneurysm_geometry_points`` for the derivation. Both default to
+    ``None``/``0.0``, which resolves to exactly today's circle
+    (``a_left == a_right == b == R``) -- **not an approximation of it** --
+    so ``configs/geometry.yaml``'s two paper-matching presets need no
+    changes and are byte-for-byte unaffected (see
+    ``tests/test_geometry_sdf.py``/``tests/test_mechanistic_conservation.py``'s
+    exact-preservation regression tests).
+    """
 
     vessel_diameter_mm: float
     aneurysm_diameter_mm: float
     vessel_length_mm: float
+    # None => aneurysm_diameter_mm / 2 (today's semicircle height), resolved
+    # in _aneurysm_geometry_points rather than here, since the default
+    # depends on aneurysm_diameter_mm.
+    sac_height_mm: float | None = None
+    # Dimensionless, in (-1, 1); 0 = symmetric (today's shape). Shifts the
+    # ellipse center (and hence the apex) toward the outlet side for
+    # positive values, toward the inlet side for negative -- see
+    # _aneurysm_geometry_points. Also stands in for a "tilted"-looking sac
+    # (docs/geometry_redesign_assessment.md Section 6): a literal rotated
+    # neck was assessed and deferred as disproportionately complex relative
+    # to its value, since it would detach the neck from the horizontal
+    # vessel wall.
+    sac_asymmetry: float = 0.0
 
     @classmethod
     def from_preset(cls, preset: dict) -> "GeometryConfig":
@@ -76,6 +105,8 @@ class GeometryConfig:
             vessel_diameter_mm=float(preset["vessel_diameter_mm"]),
             aneurysm_diameter_mm=float(preset["aneurysm_diameter_mm"]),
             vessel_length_mm=float(preset["vessel_length_mm"]),
+            sac_height_mm=float(preset["sac_height_mm"]) if "sac_height_mm" in preset else None,
+            sac_asymmetry=float(preset.get("sac_asymmetry", 0.0)),
         )
 
 
@@ -142,7 +173,35 @@ def build_channel_mesh(
 
 
 def _aneurysm_geometry_points(geom: GeometryConfig) -> dict:
-    """Analytic quantities (in meters) describing the vessel+sac outline."""
+    """Analytic quantities (in meters) describing the vessel+sac outline.
+
+    Sac boundary: two quarter-ellipse arcs meeting at a single apex --
+    ``x = xc_ellipse + a_right*cos(theta), y = D + b*sin(theta)`` for
+    ``theta in [0, pi/2]`` (right half) and the same with ``a_left`` for
+    ``theta in [pi/2, pi]`` (left half). Both halves share the vertical
+    semi-axis ``b`` and meet at ``theta = pi/2`` with a horizontal tangent
+    regardless of ``a_left``/``a_right`` (``dy/dtheta = b*cos(theta) = 0``
+    there for either formula), so the apex is automatically smooth with no
+    extra continuity constraint needed.
+
+    ``xc_ellipse``/``a_left``/``a_right`` are derived so the two neck
+    attachment points stay exactly ``x_neck_left``/``x_neck_right``
+    (``xc +/- R``, unchanged from the plain-circle formula) for *any*
+    ``sac_asymmetry`` -- only the ellipse's own center shifts, not the
+    vessel-wall attachment. This is why `_build_boundary_polygon`'s
+    straight top-wall stubs and `is_wall_vessel`'s complement-based
+    definition need no changes at all for the new shape: solving
+    ``xc_ellipse - a_left = xc - R`` and ``xc_ellipse + a_right = xc + R``
+    simultaneously for a center offset ``off = sac_asymmetry * R`` gives
+    ``xc_ellipse = xc + off``, ``a_left = R + off``, ``a_right = R - off``
+    -- substituting confirms both attachment points land exactly on
+    ``xc -/+ R`` independent of ``off``.
+
+    Setting ``sac_asymmetry = 0`` and ``sac_height_mm = None`` (both
+    dataclass defaults) gives ``a_left == a_right == b == R`` exactly --
+    a circle, not an approximation of one -- reproducing today's plain
+    semicircle formula bit-for-bit.
+    """
 
     L = geom.vessel_length_mm * MM_TO_M
     D = geom.vessel_diameter_mm * MM_TO_M
@@ -156,7 +215,19 @@ def _aneurysm_geometry_points(geom: GeometryConfig) -> dict:
             f"neck spans [{x_neck_left:.4f}, {x_neck_right:.4f}] m but the "
             f"vessel is only [0, {L:.4f}] m long."
         )
-    return dict(L=L, D=D, R=R, xc=xc, x_neck_left=x_neck_left, x_neck_right=x_neck_right)
+
+    if not (-1.0 < geom.sac_asymmetry < 1.0):
+        raise ValueError(f"sac_asymmetry must be in (-1, 1), got {geom.sac_asymmetry}")
+    b = R if geom.sac_height_mm is None else geom.sac_height_mm * MM_TO_M
+    offset = geom.sac_asymmetry * R
+    xc_ellipse = xc + offset
+    a_left = R + offset
+    a_right = R - offset
+
+    return dict(
+        L=L, D=D, R=R, xc=xc, x_neck_left=x_neck_left, x_neck_right=x_neck_right,
+        xc_ellipse=xc_ellipse, a_left=a_left, a_right=a_right, b=b,
+    )
 
 
 def _build_boundary_polygon(geom: GeometryConfig, mesh_cfg: MeshConfig, h: float) -> np.ndarray:
@@ -168,7 +239,8 @@ def _build_boundary_polygon(geom: GeometryConfig, mesh_cfg: MeshConfig, h: float
     """
 
     g = _aneurysm_geometry_points(geom)
-    L, D, R, xc = g["L"], g["D"], g["R"], g["xc"]
+    L, D, R = g["L"], g["D"], g["R"]
+    xc_ellipse, a_left, a_right, b = g["xc_ellipse"], g["a_left"], g["a_right"], g["b"]
     xr, xl = g["x_neck_right"], g["x_neck_left"]
     n_min = mesh_cfg.min_boundary_points_per_edge
 
@@ -182,6 +254,12 @@ def _build_boundary_polygon(geom: GeometryConfig, mesh_cfg: MeshConfig, h: float
     top_right = edge((L, D), (xr, D))
 
     # Graded arc sampling: denser near theta=0 and theta=pi (the two necks).
+    # Point-count target uses R (the neck half-width, unaffected by
+    # sac_height_mm/sac_asymmetry -- see _aneurysm_geometry_points) rather
+    # than a true ellipse arc-length (no elementary closed form) -- this
+    # only controls point density, not position, so the approximation is
+    # harmless; it's exact for the circle case (pi*R is the true semicircle
+    # arc length).
     band = mesh_cfg.neck_band_fraction
     refine = mesh_cfg.neck_refinement_factor
     n_arc = max(3 * n_min, int(round(np.pi * R / h * refine)))
@@ -192,7 +270,12 @@ def _build_boundary_polygon(geom: GeometryConfig, mesh_cfg: MeshConfig, h: float
         u - (refine - 1.0) / (2.0 * np.pi * refine) * np.sin(2.0 * np.pi * u) * (2.0 * band)
     )
     theta = np.clip(theta, 0.0, np.pi)
-    arc = np.column_stack([xc + R * np.cos(theta), D + R * np.sin(theta)])
+    # Right quarter-ellipse (theta <= pi/2) uses a_right, left uses a_left --
+    # both formulas agree exactly at theta=pi/2 (the shared apex), so the
+    # choice of "<=" at that boundary doesn't matter (see
+    # _aneurysm_geometry_points docstring).
+    a_theta = np.where(theta <= 0.5 * np.pi, a_right, a_left)
+    arc = np.column_stack([xc_ellipse + a_theta * np.cos(theta), D + b * np.sin(theta)])
 
     top_left = edge((xl, D), (0.0, D))
     left = edge((0.0, D), (0.0, 0.0))
@@ -329,7 +412,11 @@ def build_aneurysm_mesh(
 
     g = _aneurysm_geometry_points(geom)
     L, D, R = g["L"], g["D"], g["R"]
-    approx_area = L * D + 0.5 * np.pi * R**2
+    a_left, a_right, b = g["a_left"], g["a_right"], g["b"]
+    # Sac area = sum of the two quarter-ellipse areas, pi/4*a*b each; since
+    # a_left + a_right == 2*R always (see _aneurysm_geometry_points), this
+    # simplifies to 0.5*pi*b*R -- exactly the old 0.5*pi*R**2 when b == R.
+    approx_area = L * D + 0.25 * np.pi * b * (a_left + a_right)
     # Average equilateral-triangle area a = sqrt(3)/4 * h^2, so
     # h = sqrt(4 * area / (sqrt(3) * n_elements)).
     h = float(np.sqrt(4.0 * approx_area / (np.sqrt(3.0) * mcfg.target_num_elements)))
@@ -360,6 +447,7 @@ def build_aneurysm_mesh(
 
     tol = 1e-7 * max(L, D)
     xc, xl, xr = g["xc"], g["x_neck_left"], g["x_neck_right"]
+    xc_ellipse = g["xc_ellipse"]
 
     # Facet-midpoint tolerance for arc membership must accommodate the chord
     # sagitta (a straight facet between two points on the circle has its
@@ -368,8 +456,24 @@ def build_aneurysm_mesh(
     arc_tol = max(0.6 * h, 5 * tol)
 
     def is_on_arc(pts: np.ndarray) -> np.ndarray:
-        r = np.hypot(pts[0] - xc, pts[1] - D)
-        return (np.abs(r - R) < arc_tol) & (pts[1] >= D - tol)
+        # Ellipse-arc membership via the implicit equation ((x-xc_e)/a)^2 +
+        # ((y-D)/b)^2 == 1 (== 1 exactly on the boundary), generalizing the
+        # old |dist_to_center - R| < tol circle test -- no closed-form
+        # distance-to-ellipse-arc exists, but this implicit-value test is
+        # sufficient for tagging (unlike geometry_sdf.py, this only needs
+        # to classify facet midpoints as on/off the arc, not report an
+        # actual distance). The physical arc_tol is converted to a
+        # normalized-radius tolerance via the local semi-axis scale, using
+        # the smaller of (a, b) so the tolerance never becomes looser than
+        # the tightest dimension (the safe/conservative direction -- avoids
+        # false positives against nearby non-arc boundary, e.g. the top
+        # wall stubs). Reduces exactly to the old test when a == b == R.
+        dx = pts[0] - xc_ellipse
+        dy = pts[1] - D
+        a_of_pt = np.where(dx >= 0.0, a_right, a_left)
+        normalized_r = np.sqrt((dx / a_of_pt) ** 2 + (dy / b) ** 2)
+        normalized_tol = arc_tol / max(min(a_right, a_left, b), 1e-12)
+        return (np.abs(normalized_r - 1.0) < normalized_tol) & (pts[1] >= D - tol)
 
     def is_inlet(pts: np.ndarray) -> np.ndarray:
         return np.isclose(pts[0], 0.0, atol=tol)
