@@ -43,6 +43,7 @@ jobs:
           --end-time-s 0.2 --dt-s 0.1
           --target-num-elements 100
           --grid-size 8
+          --also-save-raster
 
       - name: Smoke test - train
         run: >
