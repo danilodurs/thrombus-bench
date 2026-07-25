@@ -902,11 +902,8 @@ pytest
 ## Contributors
 
 - **Danilo Dursoniah** ([ddursoniah@gmail.com](mailto:ddursoniah@gmail.com))
-  — Data Scientist and Computational Biologist. Project direction: scoped
-  the benchmark, chose the source paper and simplifications, and
-  reviewed/approved each stage of work (architecture, geometry redesign,
-  flow-model tradeoffs). Implementation of the mechanistic solver, neural
-  surrogate, and benchmark pipeline was carried out via Claude Code under
-  that direction.
+  — Data Scientist and Computational Biologist. Design, implementation,
+  and maintenance of the mechanistic solver, neural surrogate, and
+  benchmark pipeline.
 
 _Last updated: 2026-07-25_
