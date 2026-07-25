@@ -12,7 +12,7 @@ import yaml
 from thrombus_bench.mechanistic.geometry_sdf import signed_distance_to_wall
 from thrombus_bench.mechanistic.mesh import GeometryConfig
 from thrombus_bench.neural.coordinate_decoder import ContinuousThrombusSurrogate
-from thrombus_bench.viz.rasterize_continuous import rasterize_continuous_model
+from thrombus_bench.viz.rasterize_continuous import grid_size_for_aspect_ratio, rasterize_continuous_model
 
 GEOMETRY_PATH = "configs/geometry.yaml"
 
@@ -120,3 +120,38 @@ def test_rasterize_continuous_model_works_for_both_geometry_presets(aneurysm_mm,
     fields_grid, fluid_mask = rasterize_continuous_model(model, params_with_time, geometry_mm, grid_size=(16, 16))
     assert fluid_mask.any()
     assert fields_grid.shape == (16, 16, 11)
+
+
+def test_grid_size_for_aspect_ratio_matches_physical_proportions():
+    """A 50 mm-long vessel with a small D+R should get far more columns
+    than rows; the ratio of (cols/rows) should match (L)/(D+R)."""
+
+    geometry_mm = torch.tensor([7.0, 3.2])  # D + R = 3.2 + 3.5 = 6.7 mm
+    n_rows, n_cols = grid_size_for_aspect_ratio(geometry_mm, vessel_length_mm=50.0, points_per_mm=8.0)
+    assert n_rows == round(6.7 * 8.0)
+    assert n_cols == round(50.0 * 8.0)
+    # Independent rounding of numerator/denominator shifts the ratio
+    # slightly from the exact physical proportion -- a loose tolerance,
+    # not exact equality, is the correct check here.
+    assert n_cols / n_rows == pytest.approx(50.0 / 6.7, rel=0.02)
+
+
+def test_grid_size_for_aspect_ratio_independent_of_latent_grid_size():
+    """This function takes no `latent_grid_size` argument at all -- a
+    change to that training-time config value must not silently affect
+    display resolution."""
+
+    geometry_mm = torch.tensor([10.0, 4.0])
+    result_a = grid_size_for_aspect_ratio(geometry_mm, points_per_mm=6.0)
+    result_b = grid_size_for_aspect_ratio(geometry_mm, points_per_mm=6.0)
+    assert result_a == result_b
+
+
+def test_grid_size_for_aspect_ratio_respects_minimum():
+    """A tiny geometry at a coarse points_per_mm should still floor at a
+    usable minimum resolution (8), not collapse to 0 or 1."""
+
+    geometry_mm = torch.tensor([0.5, 0.5])
+    n_rows, n_cols = grid_size_for_aspect_ratio(geometry_mm, vessel_length_mm=50.0, points_per_mm=0.1)
+    assert n_rows >= 8
+    assert n_cols >= 8

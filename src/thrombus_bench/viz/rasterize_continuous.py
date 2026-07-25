@@ -35,6 +35,33 @@ from ..mechanistic.mesh import GeometryConfig
 from ..neural.coordinate_decoder import VESSEL_LENGTH_MM, ContinuousThrombusSurrogate
 
 
+def grid_size_for_aspect_ratio(
+    geometry_mm: torch.Tensor, vessel_length_mm: float = VESSEL_LENGTH_MM, points_per_mm: float = 8.0
+) -> tuple[int, int]:
+    """`(n_rows, n_cols)` proportional to this sample's own physical domain
+    aspect ratio `(D + R, L)`, at `points_per_mm` points per millimeter --
+    for a *display*-resolution `rasterize_continuous_model` call, distinct
+    from `configs/*.yaml`'s `model.encoder.latent_grid_size` (a
+    training-time concern: the Stage-1 backbone's fixed latent grid
+    resolution) which this function does not read or depend on at all.
+
+    A fixed square grid (e.g. this module's own `grid_size=(64, 64)`
+    default) distorts a long, thin vessel+aneurysm domain (`L` = 50 mm vs.
+    `D + R` on the order of a few mm to a cm) into a squashed image;
+    matching the actual aspect ratio avoids that regardless of how the
+    model was trained.
+
+    `geometry_mm`: `(2,)` raw `[aneurysm_diameter_mm, vessel_diameter_mm]`,
+    same convention as `rasterize_continuous_model`'s own argument.
+    """
+
+    aneurysm_diameter_mm, vessel_diameter_mm = float(geometry_mm[0]), float(geometry_mm[1])
+    d_plus_r_mm = vessel_diameter_mm + 0.5 * aneurysm_diameter_mm
+    n_rows = max(8, int(round(d_plus_r_mm * points_per_mm)))
+    n_cols = max(8, int(round(vessel_length_mm * points_per_mm)))
+    return n_rows, n_cols
+
+
 def rasterize_continuous_model(
     model: ContinuousThrombusSurrogate,
     params_with_time: torch.Tensor,

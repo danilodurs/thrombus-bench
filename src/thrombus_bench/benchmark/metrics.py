@@ -10,10 +10,12 @@ held-out test set (`data/dataset.py` `split="test"`):
 * `field_rmse`: per-channel and overall RMSE between predicted and
   mechanistic-reference field grids (velocity + 9 species concentrations).
 * `thrombus_mask` / `thrombus_iou`: binary thrombosed-region mask (paper's
-  Sec. 2.6 M_at/FI thresholds) and its IoU between two masks -- usable if a
-  full spatial M_at/FI field is available (not saved by this project's
-  reduced-scale `generate_dataset.py`, which stores only the summary
-  scalars below; kept for use with a full-fidelity dataset).
+  Sec. 2.6 M_at/FI thresholds) and its IoU between two masks. Wired into
+  both `run_benchmark`/`run_benchmark_continuous`'s "Thrombosed-region
+  overlap" report section when a checkpoint was trained with
+  `model.predict_M_at_wall: true` (its spatial `M_at_wall`/`M_at_target`
+  field, per `data/dataset.py`) -- not usable otherwise, since a checkpoint
+  without that flag has no spatial `M_at` prediction to threshold.
 * `max_M_at_relative_error` / `thrombosed_fraction_error`: errors on the
   scalar summary targets `generate_dataset.py` *does* save.
 * `runtime_comparison`: wall-clock time per simulation, mechanistic vs.

@@ -88,13 +88,20 @@ from ..neural.baselines import (
     MeanFieldBaseline,
     NearestNeighborBaseline,
 )
-from ..neural.coordinate_decoder import ContinuousThrombusSurrogate
+from ..neural.coordinate_decoder import ContinuousThrombusSurrogate, _sdf_per_point
 from ..neural.model import ThrombusSurrogate
 from ..neural.train import DEFAULT_EXCLUDED_TEMPORAL_CHANNELS
 from ..neural.uncertainty import DeepEnsemble, MCDropoutWrapper
 from . import calibration as calibration_mod
 from . import edge_holdout_eval as edge_holdout_eval_mod
-from .metrics import field_rmse, field_rmse_pointwise, runtime_comparison, thrombus_iou, thrombus_mask
+from .metrics import (
+    field_rmse,
+    field_rmse_by_distance_to_wall,
+    field_rmse_pointwise,
+    runtime_comparison,
+    thrombus_iou,
+    thrombus_mask,
+)
 from ..data.generate_dataset import PARAM_ORDER
 from ..data.sampler import ParameterSpace, denormalize_params
 from ..viz import plots as plots_mod
@@ -498,6 +505,18 @@ def run_benchmark_continuous(
 
     accuracy = field_rmse_pointwise(pred_fields.numpy(), test_batch["fields"].numpy())
 
+    # Accuracy vs. distance to the nearest wall (Phase 6's
+    # field_rmse_by_distance_to_wall, previously computed nowhere in this
+    # module): answers whether accuracy near the wall -- where the
+    # thrombus-relevant physics is -- is worse than in the bulk, using the
+    # same analytic SDF (mechanistic.geometry_sdf.signed_distance_to_wall,
+    # via neural.coordinate_decoder._sdf_per_point, reused rather than
+    # reimplemented) the model itself conditions on internally.
+    sdf_values = _sdf_per_point(
+        test_batch["node_coords"], test_batch["batch_index"], test_batch["geometry_mm"], model.vessel_length_mm
+    ).numpy()
+    distance_to_wall_breakdown = field_rmse_by_distance_to_wall(pred_fields.numpy(), test_batch["fields"].numpy(), sdf_values)
+
     # Thrombosed-region mask IoU: only available if this checkpoint was
     # trained with predict_M_at_wall -- mirrors run_benchmark's grid-path
     # section, using M_at_target (0 off-wall, Phase 4) instead of the
@@ -627,9 +646,18 @@ def run_benchmark_continuous(
     fig.savefig(os.path.join(output_dir, "calibration_continuous.png"), dpi=150, bbox_inches="tight")
     plt.close(fig)
 
+    fig, ax = plt.subplots()
+    bin_centers_mm = 1.0e3 * 0.5 * (distance_to_wall_breakdown["bin_edges"][:-1] + distance_to_wall_breakdown["bin_edges"][1:])
+    ax.bar([f"{c:.2f}" for c in bin_centers_mm], distance_to_wall_breakdown["rmse_per_bin"], color="teal")
+    ax.set_xlabel("distance to nearest wall [mm] (bin center)")
+    ax.set_ylabel("field RMSE (log-space)")
+    ax.set_title("Accuracy vs. distance to wall")
+    fig.savefig(os.path.join(output_dir, "distance_to_wall_continuous.png"), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
     _write_report_continuous(
         output_dir, accuracy, runtime, edge_holdout_degradation, ece, model_comparison, grid_comparison,
-        thrombus_overlap, n_test=len(test_ds), n_edge_holdout=len(edge_holdout_ds),
+        thrombus_overlap, distance_to_wall_breakdown, n_test=len(test_ds), n_edge_holdout=len(edge_holdout_ds),
         excluded_temporal_channels=data_cfg.get("excluded_temporal_channels", list(DEFAULT_EXCLUDED_TEMPORAL_CHANNELS)),
     )
 
@@ -643,6 +671,7 @@ def _write_report_continuous(
     model_comparison: dict,
     grid_comparison: dict | None,
     thrombus_overlap: dict | None,
+    distance_to_wall_breakdown: dict,
     n_test: int,
     n_edge_holdout: int,
     excluded_temporal_channels: list[str],
@@ -650,6 +679,15 @@ def _write_report_continuous(
     comparison_rows = [
         f"| {name} | {m['test']['overall']:.4f} | {m['edge_holdout']['overall']:.4f} |"
         for name, m in model_comparison.items()
+    ]
+
+    distance_bin_edges_mm = 1.0e3 * distance_to_wall_breakdown["bin_edges"]
+    distance_rows = [
+        f"| {lo:.2f}-{hi:.2f} | {rmse:.4f} | {n} |"
+        for lo, hi, rmse, n in zip(
+            distance_bin_edges_mm[:-1], distance_bin_edges_mm[1:],
+            distance_to_wall_breakdown["rmse_per_bin"], distance_to_wall_breakdown["n_points_per_bin"],
+        )
     ]
 
     lines = [
@@ -669,6 +707,21 @@ def _write_report_continuous(
         "simulation's own mesh node coordinates -- no rasterization/interpolation involved (unlike "
         "the legacy grid path below), so this is the ground truth at exactly the points it's "
         "evaluated at.",
+        "",
+        "## Accuracy vs. distance to wall",
+        "",
+        "![Accuracy vs. distance to wall](distance_to_wall_continuous.png)",
+        "",
+        "RMSE binned by unsigned distance to the nearest wall "
+        "(`benchmark.metrics.field_rmse_by_distance_to_wall`, using the analytic SDF -- "
+        "`mechanistic.geometry_sdf.signed_distance_to_wall` -- at each query point's own sample "
+        "geometry) -- answers whether accuracy near the wall, where the thrombus-relevant physics "
+        "is, is worse than in the bulk; a question the legacy grid path's fluid-vs-exterior "
+        "`fluid_mask` distinction can't answer.",
+        "",
+        "| Distance to wall [mm] | RMSE (log-space) | n points |",
+        "|---|---|---|",
+        *distance_rows,
         "",
         "## Model comparison (point-query field RMSE, log-space)",
         "",
