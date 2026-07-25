@@ -43,7 +43,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from skfem import Basis, BilinearForm, ElementTriP1, ElementVector, ElementTriP2, bmat, condense, solve
-from skfem.helpers import ddot, div, sym_grad
+from skfem.helpers import curl, ddot, div, sym_grad
 
 from .mesh import TaggedMesh
 
@@ -93,6 +93,15 @@ class FlowSolution:
     def viscosity_at_quadrature(self, carreau: CarreauParams) -> np.ndarray:
         return carreau.viscosity(self.shear_rate_at_quadrature())
 
+    def vorticity_at_quadrature(self) -> np.ndarray:
+        """Scalar (out-of-plane) vorticity omega = du_y/dx - du_x/dy at
+        quadrature points -- a visualization/postprocessing quantity (not
+        used by any solver equation), added alongside `shear_rate_at_quadrature`
+        since both are the same kind of derived quantity from the converged
+        velocity field."""
+
+        return vorticity(self.basis_u.interpolate(self.u))
+
 
 def shear_rate(velocity_field) -> np.ndarray:
     """Generalized shear rate gamma_dot = sqrt(2 D:D), D = sym_grad(u), Eq. (2).
@@ -104,6 +113,21 @@ def shear_rate(velocity_field) -> np.ndarray:
 
     d = sym_grad(velocity_field)
     return np.sqrt(np.maximum(2.0 * ddot(d, d), 0.0))
+
+
+def vorticity(velocity_field) -> np.ndarray:
+    """Scalar 2D vorticity omega = du_y/dx - du_x/dy = curl(u).
+
+    Visualization/postprocessing quantity only -- no governing equation in
+    this project's Stokes formulation is expressed in terms of vorticity
+    (unlike `shear_rate`, which feeds the Carreau closure and the surface
+    ODEs' mechanical-activation gradient). `velocity_field` is a scikit-fem
+    `DiscreteField` (e.g. from `basis.interpolate(u_dofs)`); returns an
+    array shaped like the field's quadrature-point grid (n_elements,
+    n_quadrature_points).
+    """
+
+    return curl(velocity_field)
 
 
 def _logistic_step(x, center: float, steepness: float, lo: float = 0.0, hi: float = 1.0):
@@ -320,3 +344,75 @@ def compute_boundary_flux(flow: FlowSolution, boundary_name: str) -> float:
         return dot(w["u"], w.n)
 
     return float(flux.assemble(fb, u=fb.interpolate(flow.u)))
+
+
+def wall_traction(
+    flow: FlowSolution,
+    carreau: CarreauParams,
+    boundary_name: str,
+    thrombus_fields: ThrombusViscosityFields | None = None,
+) -> dict:
+    """Traction vector t = sigma.n at every quadrature point along a tagged
+    boundary's facets, sigma = -p*I + 2*mu*sym_grad(u) -- the actual
+    Cauchy stress consistent with `solve_steady_flow`'s weak form (`a_visc`'s
+    `2*mu*ddot(sym_grad(u), sym_grad(v))` + `b_coupling`'s `-p*div(u)`), not
+    just the scalar shear-rate invariant `shear_rate`/`shear_rate_at_quadrature`
+    report. `mu` is evaluated the same way `solve_steady_flow` evaluates it
+    (Carreau viscosity at the local shear rate, optionally including Eq.
+    (18)'s thrombus multiplier via `thrombus_fields`), so this is the actual
+    per-point wall force per unit area, not shear rate rescaled by a
+    constant viscosity.
+
+    Unlike `compute_boundary_flux` (a single integrated scalar), this
+    returns the full per-point field, since a wall traction visualization
+    (quiver/2D map, see `viz/showcase_plots.py`) needs it pointwise.
+
+    Returns `{"points": (n_qp, 2), "traction": (n_qp, 2), "magnitude":
+    (n_qp,)}`, all flattened across elements/quadrature points; `points`
+    are physical (x, y) coordinates in meters.
+    """
+
+    from skfem import FacetBasis
+
+    mesh = flow.tagged_mesh.mesh
+    fb_u = FacetBasis(mesh, flow.basis_u.elem, facets=boundary_name)
+    # `.with_element`, not a fresh `FacetBasis(..., flow.basis_p.elem, ...)`:
+    # scikit-fem picks a quadrature order per element degree, so an
+    # independently-constructed P1 FacetBasis has fewer quadrature points
+    # per facet than the P2 velocity one above -- mirrors
+    # `coupled_solver._wall_shear_rate_nodal`'s same `with_element` trick to
+    # force identical quadrature points between the two fields being
+    # combined pointwise below.
+    fb_p = fb_u.with_element(flow.basis_p.elem)
+
+    u_field = fb_u.interpolate(flow.u)
+    p_field = np.asarray(fb_p.interpolate(flow.p))
+
+    d = sym_grad(u_field)
+    gamma_dot = np.sqrt(np.maximum(2.0 * ddot(d, d), 0.0))
+    mu = carreau.viscosity(gamma_dot)
+    if thrombus_fields is not None:
+        M_at_field = fb_p.interpolate(thrombus_fields.M_at_nodal)
+        FI_field = fb_p.interpolate(thrombus_fields.FI_nodal)
+        multiplier = viscosity_multiplier(
+            M_at_field, FI_field,
+            thrombus_fields.M_at_critical_plt_cm2, thrombus_fields.fibrin_critical_uM,
+            thrombus_fields.steepness_theta, thrombus_fields.multiplier_max,
+        )
+        mu = mu * multiplier
+
+    n = np.asarray(fb_u.normals)
+    d = np.asarray(d)
+    d_dot_n_x = d[0, 0] * n[0] + d[0, 1] * n[1]
+    d_dot_n_y = d[1, 0] * n[0] + d[1, 1] * n[1]
+    t_x = -p_field * n[0] + 2.0 * mu * d_dot_n_x
+    t_y = -p_field * n[1] + 2.0 * mu * d_dot_n_y
+
+    points = np.asarray(fb_u.global_coordinates())
+    magnitude = np.sqrt(t_x**2 + t_y**2)
+
+    return {
+        "points": np.stack([points[0].ravel(), points[1].ravel()], axis=-1),
+        "traction": np.stack([t_x.ravel(), t_y.ravel()], axis=-1),
+        "magnitude": magnitude.ravel(),
+    }
