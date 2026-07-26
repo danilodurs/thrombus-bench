@@ -62,8 +62,8 @@ prototype -- see the size caveats below and "Known limitations".
 | `mechanistic/activation.py`, `surface_ode.py`, `fibrin.py` | **Implemented & tested.** Chemical/mechanical activation (Appendix A/B), platelet adhesion/aggregation flux BCs + surface ODEs (Eqs. 6-7, C.1-C.20), Michaelis-Menten fibrin kinetics (Eqs. 16-17). |
 | `mechanistic/species_transport.py` | **Implemented & tested.** SUPG-stabilized implicit transport (huge Péclet numbers given Table 1's tiny diffusivities) + vectorized implicit reaction substepping (stiff kinetics, e.g. Eq. A.10's Γ reaching ~1e4 s⁻¹). |
 | `mechanistic/coupled_solver.py`, `run_simulation.py` | **Implemented & tested.** Full transient Stokes+CDR+surface-ODE coupling loop; CLI supports both flow-only and full-transient runs. See "Known limitations" re: thrombin/fibrin calibration. |
-| `mechanistic/geometry_sdf.py` | **Implemented & tested.** Closed-form signed-distance-to-wall function for the idealized vessel+aneurysm domain (exact union of a rectangle + circular-arc sac, not a naive per-shape min/max), reused by both `CoordinateDecoder`'s SDF input feature and the autograd physics residual's collocation-point rejection sampling. See "Known limitations" re: scope (idealized geometries only). |
-| `data/sampler.py`, `generate_dataset.py`, `dataset.py` | **Implemented & tested.** LHS sampling + edge-of-domain tail split + opt-in genuine-extrapolation split (`sample_with_extrapolation_holdout`); `generate_dataset.py` now saves point-cloud `.npz` samples by default (mesh node coordinates + values, every checkpoint per `data.n_snapshots` -- no rasterization), with the legacy fixed-grid rasterization kept as an opt-in (`--also-save-raster`) for the comparison baseline. `dataset.py` exposes both `PointCloudThrombusDataset` (primary, ragged batching) and `ThrombusSurrogateDataset` (legacy/comparison, fixed raster). |
+| `mechanistic/geometry_sdf.py` | **Implemented & tested.** Closed-form (piecewise-parametric, cheap Newton-iteration refinement per piece) signed-distance-to-wall function for the idealized vessel+aneurysm domain -- exact union of a rectangle + asymmetric-half-ellipse sac (a plain circular arc is the `sac_asymmetry == 0`/default-`sac_height_mm` special case, reproduced exactly), not a naive per-shape min/max -- reused by both `CoordinateDecoder`'s SDF input feature and the autograd physics residual's collocation-point rejection sampling. See "Known limitations" re: scope (idealized geometries only). |
+| `data/sampler.py`, `generate_dataset.py`, `dataset.py` | **Implemented & tested.** LHS sampling + edge-of-domain tail split + opt-in genuine-extrapolation split (`sample_with_extrapolation_holdout`); `generate_dataset.py` now saves point-cloud `.npz` samples by default (mesh node coordinates + values, every checkpoint per `data.n_snapshots` -- no rasterization), with the legacy fixed-grid rasterization kept as an opt-in (`--also-save-raster`) for the comparison baseline. `dataset.py` exposes both `PointCloudThrombusDataset` (primary, ragged batching) and `ThrombusSurrogateDataset` (legacy/comparison, fixed raster). `PARAM_ORDER` now has 10 entries (was 8): the geometry-redesign Phase 4b sac shape knobs `sac_height_mm`/`sac_asymmetry` are sampled, trained on, and conditioned on end to end -- see "Assumptions & Deviations" item 12 -- not just an illustrative shape primitive anymore; `.npz` datasets/checkpoints generated before this change are rejected with a clear schema-mismatch error (`data/dataset._check_params_schema`) rather than silently misread. |
 | `neural/coordinate_encoding.py` | **Implemented & tested.** Fourier/SIREN-style sinusoidal positional encoding for the `CoordinateDecoder`'s continuous `(x, y)` input. |
 | `neural/encoder.py`, `operator_core.py`, `model.py`, `coordinate_decoder.py`, `train.py` | **Implemented & tested.** FiLM-conditioned encoder + a real (if small) Fourier Neural Operator, now factored into a shared trunk (`SurrogateBackbone`) feeding either the original `Conv2d` grid-projection head (`ThrombusSurrogate`, kept as a comparison baseline) or the new `CoordinateDecoder` head (`ContinuousThrombusSurrogate`, primary path) -- see "The coordinate-decoder design" below. `operator_core.type: gnn` is still a documented, deliberately-unimplemented extension point. `train.py` has both `train` (grid) and `train_continuous` (point-cloud, including the optional autograd physics-loss term and per-checkpoint species channel-exclusion) loops. |
 | `neural/physics_losses.py` | **Partially implemented, more so than before.** `mass_conservation` (both `finite_difference`, for the grid path, and now a real `autograd` mode -- `mass_conservation_penalty_autograd` + `sample_collocation_points` + `continuous_mass_conservation_loss`, PINN-style, for the continuous path) and `nonnegativity` (finite-difference only) are implemented. `cdr_residual` and `surface_flux_bc_residual` remain unimplemented -- Phase 5 assessed `cdr_residual` for the concentration-cap-unaffected species (RP/AP/APR/APS) as more tractable than previously assumed (their reaction terms turn out to be decoupled from the unreliable T/PT/FI pathway) but still real additional scope (autograd through the whole encoder for `d/dt`, a differentiable bulk shear-rate port, per-species Laplacians), so it was deliberately deferred rather than built; see that module's docstring. |
@@ -456,7 +456,13 @@ relevant module's docstring:
    diameter, centered on the vessel's top wall at its midpoint (neck width =
    full aneurysm diameter). This is a reasonable reading of Fig. 1 but is
    not the paper's literal geometry definition (which does not exist in
-   published form).
+   published form). Generalized (geometry-redesign Phase 4b,
+   `docs/geometry_redesign_assessment.md`) to an asymmetric half-ellipse via
+   `GeometryConfig`'s optional `sac_height_mm`/`sac_asymmetry` fields, which
+   reduce to exactly this plain-circle formula at their defaults (both
+   paper presets are byte-for-byte unaffected) -- now a real, sampled
+   dataset dimension, not just a shape primitive; see item 12 below for the
+   sampling range.
 
 3. **Smooth step functions.** The paper defines several functions as hard
    thresholds/steps with only qualitative descriptions of their smoothing
@@ -558,6 +564,23 @@ relevant module's docstring:
     comment there. This was verified against an isolated wall-flux
     mass-balance test but is a nontrivial, self-derived unit reconciliation
     the paper's COMSOL implementation would not need to make explicit.
+
+12. **Sac height/asymmetry sampling ranges (geometry-redesign Phase 4b).**
+    `mesh.GeometryConfig`'s `sac_height_mm`/`sac_asymmetry` generalize the
+    sac from a plain semicircle to an asymmetric half-ellipse (see item 2
+    above and `docs/geometry_redesign_assessment.md`) -- a shape family
+    the paper never studied, so there is no paper-derived range to sample
+    from. `data/sampler.DEFAULT_RANGES` picks `sac_height_mm in [2.5, 7.0]`
+    mm and `sac_asymmetry in [-0.5, 0.5]` as a project assumption: wide
+    enough to exercise a real range of height/neck aspect ratios and
+    asymmetry, but kept strictly inside the shapes
+    `tests/test_geometry_ellipse_sac.py` already verified mesh cleanly and
+    converge for (heights up to 7mm, asymmetry magnitude up to 0.7), rather
+    than sampling into untested near-degenerate territory. `sac_height_mm`
+    defaults to `None` (`= aneurysm_diameter_mm / 2`, today's circle) at
+    the `GeometryConfig` level, but the sampler/dataset pipeline always
+    supplies an explicit numeric value -- there is no "sampled sample with
+    the default circle" case once a dataset is generated.
 
 ## Known limitations
 
@@ -908,9 +931,9 @@ pytest
     loaded/predicted, just not optimized against) -- defaults to
     `[conc_T, conc_PT, conc_FI]`, the species the concentration-cap QC
     check found unreliable (see "Known limitations").
-  - `model.encoder.param_dim: 9`: the one required difference in the
-    shared-trunk config block vs. the grid path's `8` -- the existing 8
-    scalars plus normalized time.
+  - `model.encoder.param_dim: 11`: the one required difference in the
+    shared-trunk config block vs. the grid path's `10` -- the existing 10
+    `PARAM_ORDER` scalars plus normalized time.
   - `model.coordinate_encoding.num_frequency_bands`: Phase 1's Fourier
     positional encoding's `L` (`neural/coordinate_encoding.
     DEFAULT_N_FREQUENCIES`, default `8` -- see that module's docstring for
