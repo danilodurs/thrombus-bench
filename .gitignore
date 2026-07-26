@@ -23,6 +23,7 @@ data/processed_extrap_*/
 data/processed_extrap_*_continuous/
 data/processed_pilot/
 data/processed_continuous/
+data/processed_continuous_pilot/
 checkpoints/
 *.ckpt
 *.pt
@@ -32,6 +33,8 @@ checkpoints/
 results/*.png
 results/*.md
 !results/.gitkeep
+results_pilot/
+results_continuous_pilot/
 runs/
 lightning_logs/
 .tensorboard/

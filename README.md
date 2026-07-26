@@ -102,6 +102,13 @@ particular values in these config files. See "How to run" below for the
 demo vs. pilot commands, and "Configuration" for what each `configs/*.yaml`
 file is for.
 
+The continuous-surrogate path (below) has the same demo/pilot split:
+`configs/continuous.yaml` is the smoke test, `configs/continuous_pilot.yaml`
+is the pilot-scale config -- added later than the grid path's own
+demo/pilot split above, so results generated from it are newer and smaller
+in absolute sample count, but the same "smoke test vs. real, CPU-modest
+result" distinction applies.
+
 ## Architecture
 
 ### (A) Mechanistic model — coupled solve loop
@@ -749,9 +756,16 @@ rather than overloading it with continuous-specific keys, and smaller
 still (see that file's header comment: the point-cloud path checkpoints
 each sample multiple times, so a comparably-sized dataset costs more
 wall-clock time to generate than the raster path's final-checkpoint-only
-default).
+default). `configs/continuous_pilot.yaml` is that config's pilot-scale
+counterpart (same architecture, larger sample counts/epochs -- see its
+header comment for the sizing rationale and a measured wall-clock
+estimate), added so the primary (continuous) path has a "real, if
+CPU-modest, result" option analogous to what `pilot.yaml` already gave
+the legacy grid path.
 
 ```bash
+# --- Demo (pipeline smoke test, ~a few minutes) ---
+
 # 1. Generate the dataset (point-cloud .npz by default -- add
 #    --also-save-raster too if you also want the 4th, grid-FNO comparison
 #    row in step 3 below):
@@ -771,6 +785,31 @@ thrombus-benchmark --continuous --training-config configs/continuous.yaml \
     --dataset-dir data/processed_continuous \
     --checkpoint checkpoints/continuous_model.pt
 ```
+
+```bash
+# --- Pilot (real result, ~a few minutes -- see configs/continuous_pilot.yaml's
+#     header comment for the estimate's basis; separate --output-dir/
+#     --dataset-dir keep this from overwriting the demo dataset above) ---
+
+thrombus-generate-dataset --training-config configs/continuous_pilot.yaml \
+    --output-dir data/processed_continuous_pilot --also-save-raster
+
+thrombus-train --continuous --config configs/continuous_pilot.yaml \
+    --dataset-dir data/processed_continuous_pilot \
+    --checkpoint checkpoints/continuous_pilot_model.pt
+
+thrombus-benchmark --continuous --training-config configs/continuous_pilot.yaml \
+    --dataset-dir data/processed_continuous_pilot \
+    --checkpoint checkpoints/continuous_pilot_model.pt \
+    --grid-checkpoint checkpoints/grid_model_pilot_comparison.pt \
+    --output-dir results_continuous_pilot
+```
+
+The `--grid-checkpoint` above is any separately-trained `ThrombusSurrogate`
+(e.g. `thrombus-train --config configs/demo_cpu.yaml --dataset-dir
+data/processed_continuous_pilot --checkpoint checkpoints/grid_model_pilot_comparison.pt`
+-- a demo-scale grid model is enough for this comparison row; it does not
+need to match the continuous model's scale).
 
 **Interpreting the report's RMSE numbers:** `results/report_continuous.md`'s
 "Accuracy"/"Model comparison" sections use **point-query RMSE**
@@ -898,6 +937,14 @@ pytest
   data `ThrombusSurrogateDataset`/the grid-projection baseline (or
   `thrombus-benchmark --continuous --grid-checkpoint`) can consume. Off by
   default since it's the expensive part (`griddata`/mask-building).
+- `configs/continuous_pilot.yaml`: the same structure as
+  `configs/continuous.yaml`, at pilot scale (larger `data` sample counts,
+  `optim.batch_size`/`epochs`; architecture keys unchanged) -- see this
+  file's own header comment for its sizing rationale. Added so the primary
+  (continuous) path has a real, if still CPU-modest, result to point at,
+  the same role `pilot.yaml` already served for the legacy grid path --
+  `continuous.yaml` on its own is explicitly a pipeline smoke test, not
+  sized to produce a meaningful number.
 
 ## Contributors
 

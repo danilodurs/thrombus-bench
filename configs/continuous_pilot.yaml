@@ -1,0 +1,102 @@
+# CONTINUOUS-SURROGATE PILOT CONFIG -- the continuous-path (primary path per
+# README) counterpart of configs/pilot.yaml, which only scales up the legacy
+# grid path. No such config existed before this file: configs/continuous.yaml
+# is explicitly a demo-scale pipeline smoke test (see its own header), not
+# sized to produce a real result, so there was previously no way to get a
+# "pilot-scale, not demo-scale" number out of the primary (continuous) path
+# at all. Everything below is `continuous.yaml`'s architecture (encoder/
+# operator-core/coordinate-decoder dims, physics-loss settings) unchanged --
+# only `data` sample counts and `optim.batch_size`/`epochs` are scaled up, the
+# same kind of change `pilot.yaml` makes relative to `demo_cpu.yaml`.
+#
+# Use with:
+#   thrombus-generate-dataset --training-config configs/continuous_pilot.yaml \
+#       --output-dir data/processed_continuous_pilot --also-save-raster
+#   thrombus-train --continuous --config configs/continuous_pilot.yaml \
+#       --dataset-dir data/processed_continuous_pilot \
+#       --checkpoint checkpoints/continuous_pilot_model.pt \
+#       --log runs/continuous_pilot_train_log.csv
+#
+# Sizing rationale (measured on one CPU dev machine; scale expectations to
+# your own hardware, not these exact minutes): configs/continuous.yaml's
+# 6/3/3/3 = 15 total samples (n_snapshots=3 each) took ~30s to generate,
+# i.e. ~2 s/sample. At n_train+n_val+n_test+n_edge_holdout = 90 below, that's
+# an estimated ~3 minutes. Training is comparatively cheap at this scale
+# (continuous.yaml's 10 epochs over 6 samples took a few seconds); 40 epochs
+# over 60 training samples is still expected to be well under a minute.
+# Total estimate: a few minutes end to end on CPU -- deliberately far short
+# of pilot.yaml's ~700-sample, ~15-minute grid-path budget, since the
+# point-cloud path costs more per sample (see continuous.yaml's own header)
+# and this project's scope is a single-session CPU prototype, not a
+# statistically powered benchmark either way -- see README.md "Scale
+# caveat".
+
+seed: 0
+
+data:
+  dataset_dir: data/processed_continuous_pilot
+  n_train: 60
+  n_val: 10
+  n_test: 10
+  n_edge_holdout: 10
+  edge_holdout_quantile: 0.9
+
+  n_snapshots: 3
+  points_per_sample: 64
+
+  # Same species-exclusion rationale as continuous.yaml -- see that file's
+  # comment and README.md "Known limitations".
+  excluded_temporal_channels: [conc_T, conc_PT, conc_FI]
+
+model:
+  encoder:
+    param_dim: 9
+    latent_grid_size: [32, 32]
+    hidden_channels: 32
+    n_layers: 2
+
+  operator_core:
+    type: fno
+    fno:
+      modes: 8
+      hidden_channels: 32
+      n_layers: 3
+
+  coordinate_encoding:
+    num_frequency_bands: 8
+  coordinate_decoder:
+    mlp_hidden: 128
+    n_residual_blocks: 3
+
+  output_channels: 11
+  predict_M_at_wall: true
+
+  uncertainty:
+    method: deep_ensemble
+    n_ensemble_members: 3
+    mc_dropout_rate: 0.1
+    mc_dropout_n_samples: 30
+
+physics_loss:
+  enabled: true
+  residual_mode: autograd
+  n_collocation_points: 24
+  weights:
+    data: 1.0
+    mass_conservation: 0.01
+
+optim:
+  epochs: 40           # up from continuous.yaml's 10, matching demo_cpu.yaml/pilot.yaml's ratio
+  batch_size: 16        # up from continuous.yaml's 4, matching demo_cpu.yaml/pilot.yaml
+  lr: 3.0e-4
+  weight_decay: 1.0e-5
+  optimizer: adamw
+  lr_schedule: cosine
+  grad_clip_norm: 1.0
+  early_stopping_patience: 20
+
+logging:
+  backend: csv
+  log_dir: runs/
+  checkpoint_dir: checkpoints/
+  log_every_n_steps: 10
