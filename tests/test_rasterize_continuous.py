@@ -19,7 +19,7 @@ GEOMETRY_PATH = "configs/geometry.yaml"
 
 def _tiny_model_cfg() -> dict:
     return {
-        "encoder": {"param_dim": 9, "latent_grid_size": (8, 8), "hidden_channels": 8, "n_layers": 1},
+        "encoder": {"param_dim": 11, "latent_grid_size": (8, 8), "hidden_channels": 8, "n_layers": 1},
         "operator_core": {"type": "fno", "fno": {"modes": 2, "hidden_channels": 8, "n_layers": 1}},
         "coordinate_decoder": {"mlp_hidden": 16, "n_residual_blocks": 1},
         "output_channels": 11,
@@ -29,8 +29,8 @@ def _tiny_model_cfg() -> dict:
 
 def test_rasterize_continuous_model_output_shapes():
     model = ContinuousThrombusSurrogate(_tiny_model_cfg())
-    params_with_time = torch.randn(9)
-    geometry_mm = torch.tensor([7.0, 3.2])
+    params_with_time = torch.randn(11)
+    geometry_mm = torch.tensor([7.0, 3.2, 3.5, 0.0])
 
     fields_grid, fluid_mask = rasterize_continuous_model(model, params_with_time, geometry_mm, grid_size=(16, 24))
 
@@ -41,8 +41,8 @@ def test_rasterize_continuous_model_output_shapes():
 
 def test_rasterize_continuous_model_masks_exterior_cells_with_nan():
     model = ContinuousThrombusSurrogate(_tiny_model_cfg())
-    params_with_time = torch.randn(9)
-    geometry_mm = torch.tensor([7.0, 3.2])
+    params_with_time = torch.randn(11)
+    geometry_mm = torch.tensor([7.0, 3.2, 3.5, 0.0])
 
     fields_grid, fluid_mask = rasterize_continuous_model(model, params_with_time, geometry_mm, grid_size=(20, 40))
 
@@ -60,8 +60,8 @@ def test_rasterize_continuous_model_mask_matches_analytic_sdf_directly():
     SDF exactly, cell by cell, for the same grid this function builds."""
 
     model = ContinuousThrombusSurrogate(_tiny_model_cfg())
-    params_with_time = torch.randn(9)
-    geometry_mm = torch.tensor([7.0, 3.2])
+    params_with_time = torch.randn(11)
+    geometry_mm = torch.tensor([7.0, 3.2, 3.5, 0.0])
     grid_size = (12, 18)
 
     _, fluid_mask = rasterize_continuous_model(model, params_with_time, geometry_mm, grid_size=grid_size)
@@ -74,12 +74,16 @@ def test_rasterize_continuous_model_mask_matches_analytic_sdf_directly():
     # analytic boundary (a real, if narrow, floating-point edge case, not
     # a logic bug -- this mismatch is exactly what surfaced it).
     aneurysm_mm, vessel_mm = float(geometry_mm[0]), float(geometry_mm[1])
-    geom = GeometryConfig(vessel_diameter_mm=vessel_mm, aneurysm_diameter_mm=aneurysm_mm, vessel_length_mm=50.0)
+    sac_height_mm, sac_asymmetry = float(geometry_mm[2]), float(geometry_mm[3])
+    geom = GeometryConfig(
+        vessel_diameter_mm=vessel_mm, aneurysm_diameter_mm=aneurysm_mm, vessel_length_mm=50.0,
+        sac_height_mm=sac_height_mm, sac_asymmetry=sac_asymmetry,
+    )
     L_m = 50.0 * 1e-3
     D_m = vessel_mm * 1e-3
-    R_m = aneurysm_mm * 0.5e-3
+    b_m = sac_height_mm * 1e-3
     xs = np.linspace(0.0, L_m, grid_size[1])
-    ys = np.linspace(0.0, D_m + R_m, grid_size[0])
+    ys = np.linspace(0.0, D_m + b_m, grid_size[0])
     gx, gy = np.meshgrid(xs, ys)
     expected_mask = signed_distance_to_wall(gx.ravel(), gy.ravel(), geom).reshape(grid_size) >= 0.0
 
@@ -93,9 +97,9 @@ def test_rasterize_continuous_model_grid_spans_analytic_bounding_box():
     time) node bounding box."""
 
     model = ContinuousThrombusSurrogate(_tiny_model_cfg())
-    params_with_time = torch.randn(9)
+    params_with_time = torch.randn(11)
     aneurysm_mm, vessel_mm = 7.0, 3.2
-    geometry_mm = torch.tensor([aneurysm_mm, vessel_mm])
+    geometry_mm = torch.tensor([aneurysm_mm, vessel_mm, aneurysm_mm / 2.0, 0.0])
 
     _, fluid_mask = rasterize_continuous_model(model, params_with_time, geometry_mm, grid_size=(10, 10))
 
@@ -114,8 +118,8 @@ def test_rasterize_continuous_model_works_for_both_geometry_presets(aneurysm_mm,
     )
 
     model = ContinuousThrombusSurrogate(_tiny_model_cfg())
-    params_with_time = torch.randn(9)
-    geometry_mm = torch.tensor([aneurysm_mm, vessel_mm])
+    params_with_time = torch.randn(11)
+    geometry_mm = torch.tensor([aneurysm_mm, vessel_mm, aneurysm_mm / 2.0, 0.0])
 
     fields_grid, fluid_mask = rasterize_continuous_model(model, params_with_time, geometry_mm, grid_size=(16, 16))
     assert fluid_mask.any()
@@ -126,7 +130,7 @@ def test_grid_size_for_aspect_ratio_matches_physical_proportions():
     """A 50 mm-long vessel with a small D+R should get far more columns
     than rows; the ratio of (cols/rows) should match (L)/(D+R)."""
 
-    geometry_mm = torch.tensor([7.0, 3.2])  # D + R = 3.2 + 3.5 = 6.7 mm
+    geometry_mm = torch.tensor([7.0, 3.2, 3.5, 0.0])  # D + b = 3.2 + 3.5 = 6.7 mm
     n_rows, n_cols = grid_size_for_aspect_ratio(geometry_mm, vessel_length_mm=50.0, points_per_mm=8.0)
     assert n_rows == round(6.7 * 8.0)
     assert n_cols == round(50.0 * 8.0)
@@ -141,7 +145,7 @@ def test_grid_size_for_aspect_ratio_independent_of_latent_grid_size():
     change to that training-time config value must not silently affect
     display resolution."""
 
-    geometry_mm = torch.tensor([10.0, 4.0])
+    geometry_mm = torch.tensor([10.0, 4.0, 5.0, 0.0])
     result_a = grid_size_for_aspect_ratio(geometry_mm, points_per_mm=6.0)
     result_b = grid_size_for_aspect_ratio(geometry_mm, points_per_mm=6.0)
     assert result_a == result_b
@@ -151,7 +155,7 @@ def test_grid_size_for_aspect_ratio_respects_minimum():
     """A tiny geometry at a coarse points_per_mm should still floor at a
     usable minimum resolution (8), not collapse to 0 or 1."""
 
-    geometry_mm = torch.tensor([0.5, 0.5])
+    geometry_mm = torch.tensor([0.5, 0.5, 0.25, 0.0])
     n_rows, n_cols = grid_size_for_aspect_ratio(geometry_mm, vessel_length_mm=50.0, points_per_mm=0.1)
     assert n_rows >= 8
     assert n_cols >= 8

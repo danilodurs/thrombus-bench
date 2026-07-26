@@ -9,7 +9,15 @@ physiologically-motivated ranges drawn from the paper's sensitivity studies
 (Sec. 3.3):
 
 * Geometry: aneurysm diameter (7-10 mm, interpolated/extrapolated around the
-  paper's two studied geometries), vessel diameter (scaled proportionally).
+  paper's two studied geometries), vessel diameter (scaled proportionally),
+  and the geometry-redesign Phase 4b sac shape knobs `sac_height_mm`/
+  `sac_asymmetry` (`mechanistic.mesh.GeometryConfig` -- see
+  `docs/geometry_redesign_assessment.md`), sampled independently of
+  `aneurysm_diameter_mm` -- the paper never studied these, so the ranges
+  below are a project assumption (README.md "Assumptions & Deviations"),
+  not paper-derived, chosen to stay well inside the shapes
+  `tests/test_geometry_ellipse_sac.py` already verified mesh/flow-solve
+  cleanly for (heights up to 7mm, asymmetry magnitude up to 0.7).
 * Inlet velocity: 30-100 cm/s (paper explores 45/75/100 cm/s, Fig. 9;
   physiological range 30-70 cm/s per Sec. 3.3.3 citation).
 * Resting platelet concentration: 1e8-5e8 PLT/ml (Sec. 3.3.1 citation range).
@@ -45,6 +53,20 @@ from scipy.stats import qmc
 DEFAULT_RANGES = {
     "aneurysm_diameter_mm": (7.0, 10.0),
     "vessel_diameter_mm": (3.2, 4.0),
+    # Sac height/asymmetry (geometry-redesign Phase 4b, mesh.GeometryConfig
+    # sac_height_mm/sac_asymmetry) -- project assumption, not paper-derived
+    # (see module docstring). Height sampled independently of
+    # aneurysm_diameter_mm rather than as a fixed fraction of it, so LHS
+    # actually explores height/neck aspect ratio as its own dimension;
+    # 2.5-7.0mm stays strictly inside the 1.5-7.0mm range
+    # test_geometry_ellipse_sac.py already confirmed watertight/converged
+    # meshing for. Asymmetry kept well inside the (-1, 1) validity bound
+    # (mesh.py's _aneurysm_geometry_points) and inside the +-0.7 magnitude
+    # that module's tests already exercise, to avoid sampling into
+    # near-degenerate (one quarter-ellipse semi-axis close to 0) territory
+    # nothing has verified meshes cleanly for.
+    "sac_height_mm": (2.5, 7.0),
+    "sac_asymmetry": (-0.5, 0.5),
     "inlet_velocity_cm_s": (30.0, 100.0),
     "platelet_conc_plt_ml": (1.0e8, 5.0e8),
     "heparin_conc_uM": (0.1, 0.5),

@@ -32,6 +32,8 @@ def _sample(aneurysm_mm: float, vessel_mm: float, heparin_uM: float = 2.0) -> di
     return {
         "aneurysm_diameter_mm": aneurysm_mm,
         "vessel_diameter_mm": vessel_mm,
+        "sac_height_mm": aneurysm_mm / 2.0,
+        "sac_asymmetry": 0.0,
         "inlet_velocity_cm_s": 47.0,
         "platelet_conc_plt_ml": 3.5e8,
         "heparin_conc_uM": heparin_uM,

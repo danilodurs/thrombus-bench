@@ -250,21 +250,26 @@ def sample_collocation_points(
     PDE residual is enforced without needing ground-truth field values
     there.
 
-    `geometry_mm`: `(batch, 2)` raw `[aneurysm_diameter_mm,
-    vessel_diameter_mm]`, same convention as `ContinuousThrombusSurrogate.
-    forward`'s argument of the same name. Returns `(query_points_m,
-    batch_index)` in this project's usual flat + `batch_index` ragged
-    convention (`neural/coordinate_decoder.py`, `data/dataset.
-    pointcloud_collate_fn`).
+    `geometry_mm`: `(batch, 4)` raw `[aneurysm_diameter_mm,
+    vessel_diameter_mm, sac_height_mm, sac_asymmetry]`, same convention as
+    `ContinuousThrombusSurrogate.forward`'s argument of the same name.
+    Returns `(query_points_m, batch_index)` in this project's usual flat +
+    `batch_index` ragged convention (`neural/coordinate_decoder.py`,
+    `data/dataset.pointcloud_collate_fn`).
 
     Uniformly oversamples each sample's own analytic bounding box `[0, L] x
-    [0, D + R]` (`geometry_sdf.py`'s module docstring) by `oversample_factor`
-    and keeps only positive-SDF points, rather than a rejection loop with an
-    unbounded worst case: the vessel+aneurysm domain (a long rectangle plus
-    a half-disk bulge) occupies a large majority of its own bounding box, so
-    under-filling is not expected at `oversample_factor=4` in practice; if
-    it happens anyway, this returns however many points were actually
-    accepted for that sample rather than raising or padding.
+    [0, D + b]` (`b` = `sac_height_mm`; `geometry_sdf.py`'s module
+    docstring) by `oversample_factor` and keeps only positive-SDF points
+    (using the sample's *actual* geometry, including sac_height_mm/
+    sac_asymmetry -- passing only aneurysm_diameter_mm/vessel_diameter_mm to
+    `GeometryConfig` here would silently score membership against the wrong,
+    plain-circle shape for any asymmetric/non-default sample), rather than a
+    rejection loop with an unbounded worst case: the vessel+aneurysm domain
+    (a long rectangle plus a half-disk-or-ellipse bulge) occupies a large
+    majority of its own bounding box, so under-filling is not expected at
+    `oversample_factor=4` in practice; if it happens anyway, this returns
+    however many points were actually accepted for that sample rather than
+    raising or padding.
     """
 
     rng = rng if rng is not None else np.random.default_rng()
@@ -276,14 +281,16 @@ def sample_collocation_points(
             vessel_diameter_mm=float(geometry_np[b, 1]),
             aneurysm_diameter_mm=float(geometry_np[b, 0]),
             vessel_length_mm=vessel_length_mm,
+            sac_height_mm=float(geometry_np[b, 2]),
+            sac_asymmetry=float(geometry_np[b, 3]),
         )
         L_m = vessel_length_mm * 1.0e-3
         D_m = geometry_np[b, 1] * 1.0e-3
-        R_m = geometry_np[b, 0] * 0.5e-3
+        b_m = geometry_np[b, 2] * 1.0e-3
 
         n_candidates = n_points_per_sample * oversample_factor
         xs = rng.uniform(0.0, L_m, n_candidates)
-        ys = rng.uniform(0.0, D_m + R_m, n_candidates)
+        ys = rng.uniform(0.0, D_m + b_m, n_candidates)
         inside = signed_distance_to_wall(xs, ys, geom) > 0.0
 
         accepted = np.column_stack([xs[inside], ys[inside]])[:n_points_per_sample]

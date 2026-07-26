@@ -17,8 +17,9 @@ FEM mesh's scattered node values onto a grid via `griddata`, since the
 mechanistic solver has no other way to give you a value at an arbitrary
 point), this queries the model *directly* at each grid point -- no
 interpolation, no FEM mesh needed at inference time at all. The grid spans
-the sample's own analytic bounding box `[0, L] x [0, D + R]` (`geometry_sdf.
-py`'s module docstring convention), and exterior cells (outside the actual
+the sample's own analytic bounding box `[0, L] x [0, D + b]` (`b` =
+`sac_height_mm`; `geometry_sdf.py`'s module docstring convention), and
+exterior cells (outside the actual
 vessel+aneurysm domain, which doesn't fill its bounding box -- an L/T-shaped
 union) are masked via Phase 1's analytic SDF, exactly like
 `data/generate_dataset._fluid_mask` does for the legacy raster path, but
@@ -39,7 +40,7 @@ def grid_size_for_aspect_ratio(
     geometry_mm: torch.Tensor, vessel_length_mm: float = VESSEL_LENGTH_MM, points_per_mm: float = 8.0
 ) -> tuple[int, int]:
     """`(n_rows, n_cols)` proportional to this sample's own physical domain
-    aspect ratio `(D + R, L)`, at `points_per_mm` points per millimeter --
+    aspect ratio `(D + b, L)`, at `points_per_mm` points per millimeter --
     for a *display*-resolution `rasterize_continuous_model` call, distinct
     from `configs/*.yaml`'s `model.encoder.latent_grid_size` (a
     training-time concern: the Stage-1 backbone's fixed latent grid
@@ -47,17 +48,21 @@ def grid_size_for_aspect_ratio(
 
     A fixed square grid (e.g. this module's own `grid_size=(64, 64)`
     default) distorts a long, thin vessel+aneurysm domain (`L` = 50 mm vs.
-    `D + R` on the order of a few mm to a cm) into a squashed image;
+    `D + b` on the order of a few mm to a cm) into a squashed image;
     matching the actual aspect ratio avoids that regardless of how the
     model was trained.
 
-    `geometry_mm`: `(2,)` raw `[aneurysm_diameter_mm, vessel_diameter_mm]`,
-    same convention as `rasterize_continuous_model`'s own argument.
+    `geometry_mm`: `(4,)` raw `[aneurysm_diameter_mm, vessel_diameter_mm,
+    sac_height_mm, sac_asymmetry]`, same convention as
+    `rasterize_continuous_model`'s own argument (only `vessel_diameter_mm`/
+    `sac_height_mm` are used here -- aspect ratio doesn't depend on
+    `aneurysm_diameter_mm`/`sac_asymmetry`, which affect the sac's x-extent
+    and left/right split, not its `y`-extent).
     """
 
-    aneurysm_diameter_mm, vessel_diameter_mm = float(geometry_mm[0]), float(geometry_mm[1])
-    d_plus_r_mm = vessel_diameter_mm + 0.5 * aneurysm_diameter_mm
-    n_rows = max(8, int(round(d_plus_r_mm * points_per_mm)))
+    vessel_diameter_mm, sac_height_mm = float(geometry_mm[1]), float(geometry_mm[2])
+    d_plus_b_mm = vessel_diameter_mm + sac_height_mm
+    n_rows = max(8, int(round(d_plus_b_mm * points_per_mm)))
     n_cols = max(8, int(round(vessel_length_mm * points_per_mm)))
     return n_rows, n_cols
 
@@ -71,11 +76,12 @@ def rasterize_continuous_model(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Query `model` on a regular `grid_size` grid for one sample.
 
-    `params_with_time`: `(9,)` -- one sample's normalized encoder input
+    `params_with_time`: `(11,)` -- one sample's normalized encoder input
     (same convention as `ContinuousThrombusSurrogate.forward`).
-    `geometry_mm`: `(2,)` -- that sample's raw `[aneurysm_diameter_mm,
-    vessel_diameter_mm]`. `grid_size`: `(n_rows, n_cols)`, matching
-    `data/generate_dataset._rasterize`'s convention.
+    `geometry_mm`: `(4,)` -- that sample's raw `[aneurysm_diameter_mm,
+    vessel_diameter_mm, sac_height_mm, sac_asymmetry]`. `grid_size`:
+    `(n_rows, n_cols)`, matching `data/generate_dataset._rasterize`'s
+    convention.
 
     Returns `(fields_grid, fluid_mask)`:
     - `fields_grid`: `(n_rows, n_cols, output_channels)` float32, NaN
@@ -87,18 +93,21 @@ def rasterize_continuous_model(
     """
 
     aneurysm_diameter_mm, vessel_diameter_mm = float(geometry_mm[0]), float(geometry_mm[1])
+    sac_height_mm, sac_asymmetry = float(geometry_mm[2]), float(geometry_mm[3])
     geom = GeometryConfig(
         vessel_diameter_mm=vessel_diameter_mm,
         aneurysm_diameter_mm=aneurysm_diameter_mm,
         vessel_length_mm=vessel_length_mm,
+        sac_height_mm=sac_height_mm,
+        sac_asymmetry=sac_asymmetry,
     )
     L_m = vessel_length_mm * 1.0e-3
     D_m = vessel_diameter_mm * 1.0e-3
-    R_m = aneurysm_diameter_mm * 0.5e-3
+    b_m = sac_height_mm * 1.0e-3
 
     n_rows, n_cols = grid_size
     xs = np.linspace(0.0, L_m, n_cols)
-    ys = np.linspace(0.0, D_m + R_m, n_rows)
+    ys = np.linspace(0.0, D_m + b_m, n_rows)
     gx, gy = np.meshgrid(xs, ys)  # (n_rows, n_cols) each
 
     query_points_m = torch.from_numpy(np.column_stack([gx.ravel(), gy.ravel()]).astype(np.float32))

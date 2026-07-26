@@ -26,6 +26,8 @@ def _small_sample() -> dict:
     return {
         "aneurysm_diameter_mm": 7.0,
         "vessel_diameter_mm": 3.2,
+        "sac_height_mm": 3.5,
+        "sac_asymmetry": 0.0,
         "inlet_velocity_cm_s": 47.0,
         "platelet_conc_plt_ml": 3.5e8,
         "heparin_conc_uM": 2.0,

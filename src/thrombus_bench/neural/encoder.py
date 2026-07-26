@@ -4,8 +4,9 @@ Responsibility
 ---------------
 Map the per-sample input parameter vector (geometry + physiological
 parameters + inlet velocity -- `configs/training.yaml`
-`model.encoder.param_dim`, 8 scalars matching
-`data/generate_dataset.PARAM_ORDER`) onto a fixed-resolution latent grid
+`model.encoder.param_dim`, `len(data.generate_dataset.PARAM_ORDER)`
+scalars, 10 for the grid path / 11 for the continuous path's extra
+normalized-time scalar) onto a fixed-resolution latent grid
 (`model.encoder.latent_grid_size`) that the operator core (`operator_core.py`)
 consumes.
 

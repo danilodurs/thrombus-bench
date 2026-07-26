@@ -75,7 +75,7 @@ def test_mc_dropout_wrapper_leaves_non_dropout_layers_in_eval_mode():
 
 def _tiny_continuous_cfg(mc_dropout_rate: float = 0.5) -> dict:
     return {
-        "encoder": {"param_dim": 9, "latent_grid_size": (8, 8), "hidden_channels": 8, "n_layers": 1},
+        "encoder": {"param_dim": 11, "latent_grid_size": (8, 8), "hidden_channels": 8, "n_layers": 1},
         "operator_core": {"type": "fno", "fno": {"modes": 2, "hidden_channels": 8, "n_layers": 1}},
         "coordinate_decoder": {"mlp_hidden": 16, "n_residual_blocks": 1},
         "output_channels": 11,
@@ -87,8 +87,8 @@ def _continuous_call_args():
     """A ragged 2-sample batch, matching ContinuousThrombusSurrogate.forward's
     (params_with_time, query_points_m, batch_index, geometry_mm) signature."""
 
-    params_with_time = torch.randn(2, 9)
-    geometry_mm = torch.tensor([[7.0, 3.2], [10.0, 4.0]])
+    params_with_time = torch.randn(2, 11)
+    geometry_mm = torch.tensor([[7.0, 3.2, 3.5, 0.0], [10.0, 4.0, 5.0, 0.2]])
     counts = [4, 6]
     batch_index = torch.cat([torch.full((n,), b, dtype=torch.long) for b, n in enumerate(counts)])
     query_points_m = torch.rand(sum(counts), 2) * torch.tensor([0.05, 0.0067])

@@ -16,10 +16,10 @@ from thrombus_bench.neural.model import ThrombusSurrogate
 
 
 def _continuous_model_cfg():
-    # param_dim=9: the existing 8 (data/generate_dataset.PARAM_ORDER) +
+    # param_dim=11: the existing 10 (data/generate_dataset.PARAM_ORDER) +
     # normalized time, per docs/continuous_surrogate_design.md.
     return {
-        "encoder": {"param_dim": 9, "latent_grid_size": (16, 16), "hidden_channels": 8, "n_layers": 2},
+        "encoder": {"param_dim": 11, "latent_grid_size": (16, 16), "hidden_channels": 8, "n_layers": 2},
         "operator_core": {"type": "fno", "fno": {"modes": 4, "hidden_channels": 8, "n_layers": 2}},
         "coordinate_decoder": {"mlp_hidden": 32, "n_residual_blocks": 2},
         "output_channels": 11,
@@ -29,7 +29,7 @@ def _continuous_model_cfg():
 
 def _legacy_model_cfg():
     return {
-        "encoder": {"param_dim": 8, "latent_grid_size": (16, 16), "hidden_channels": 8, "n_layers": 2},
+        "encoder": {"param_dim": 10, "latent_grid_size": (16, 16), "hidden_channels": 8, "n_layers": 2},
         "operator_core": {"type": "fno", "fno": {"modes": 4, "hidden_channels": 8, "n_layers": 2}},
         "output_channels": 11,
         "uncertainty": {"mc_dropout_rate": 0.1},
@@ -40,9 +40,9 @@ def test_continuous_surrogate_output_shape_with_ragged_query_counts():
     model = ContinuousThrombusSurrogate(_continuous_model_cfg())
 
     batch = 3
-    params = torch.randn(batch, 9)
-    # aneurysm_diameter_mm, vessel_diameter_mm per sample.
-    geometry_mm = torch.tensor([[7.0, 3.2], [10.0, 4.0], [8.5, 3.6]])
+    params = torch.randn(batch, 11)
+    # aneurysm_diameter_mm, vessel_diameter_mm, sac_height_mm, sac_asymmetry per sample.
+    geometry_mm = torch.tensor([[7.0, 3.2, 3.5, 0.0], [10.0, 4.0, 5.0, 0.2], [8.5, 3.6, 4.0, -0.3]])
 
     # Ragged: sample 0 has 5 points, sample 1 has 1 point, sample 2 has 12.
     counts = [5, 1, 12]
@@ -63,8 +63,8 @@ def test_continuous_surrogate_single_sample_all_points():
     node of a single sample at once."""
 
     model = ContinuousThrombusSurrogate(_continuous_model_cfg())
-    params = torch.randn(1, 9)
-    geometry_mm = torch.tensor([[7.0, 3.2]])
+    params = torch.randn(1, 11)
+    geometry_mm = torch.tensor([[7.0, 3.2, 3.5, 0.0]])
     query_points_m = torch.rand(37, 2) * torch.tensor([0.05, 0.01])
     batch_index = torch.zeros(37, dtype=torch.long)
 
@@ -83,8 +83,8 @@ def test_gradient_flows_to_all_parameters_through_grid_sample_and_sdf():
 
     model = ContinuousThrombusSurrogate(_continuous_model_cfg())
     batch = 2
-    params = torch.randn(batch, 9, requires_grad=True)
-    geometry_mm = torch.tensor([[7.0, 3.2], [10.0, 4.0]])
+    params = torch.randn(batch, 11, requires_grad=True)
+    geometry_mm = torch.tensor([[7.0, 3.2, 3.5, 0.0], [10.0, 4.0, 5.0, 0.2]])
     counts = [4, 6]
     batch_index = torch.cat([torch.full((n,), b, dtype=torch.long) for b, n in enumerate(counts)])
     query_points_m = torch.rand(sum(counts), 2) * torch.tensor([0.05, 0.01])
@@ -132,7 +132,7 @@ def test_legacy_grid_projection_path_unaffected_by_stage_split():
     model -- fixed output shape, no ragged/query-point machinery involved."""
 
     model = ThrombusSurrogate(_legacy_model_cfg())
-    params = torch.randn(3, 8)
+    params = torch.randn(3, 10)
     out = model(params)
     assert out.shape == (3, 11, 16, 16)
     assert out.dtype == torch.float32

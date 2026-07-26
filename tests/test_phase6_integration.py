@@ -30,6 +30,8 @@ def _sample(aneurysm_mm: float, vessel_mm: float) -> dict:
     return {
         "aneurysm_diameter_mm": aneurysm_mm,
         "vessel_diameter_mm": vessel_mm,
+        "sac_height_mm": aneurysm_mm / 2.0,
+        "sac_asymmetry": 0.0,
         "inlet_velocity_cm_s": 47.0,
         "platelet_conc_plt_ml": 3.5e8,
         "heparin_conc_uM": 2.0,
@@ -82,7 +84,11 @@ def test_continuous_baselines_evaluated_with_pointwise_and_distance_to_wall_metr
     # using Phase 1's SDF against the test sample's own geometry -- the
     # genuinely new capability this phase adds.
     aneurysm_mm, vessel_mm = float(test_item["geometry_mm"][0]), float(test_item["geometry_mm"][1])
-    geom = GeometryConfig(vessel_diameter_mm=vessel_mm, aneurysm_diameter_mm=aneurysm_mm, vessel_length_mm=50.0)
+    sac_height_mm, sac_asymmetry = float(test_item["geometry_mm"][2]), float(test_item["geometry_mm"][3])
+    geom = GeometryConfig(
+        vessel_diameter_mm=vessel_mm, aneurysm_diameter_mm=aneurysm_mm, vessel_length_mm=50.0,
+        sac_height_mm=sac_height_mm, sac_asymmetry=sac_asymmetry,
+    )
     node_coords_np = test_item["node_coords"].numpy()
     sdf_values = signed_distance_to_wall(node_coords_np[:, 0], node_coords_np[:, 1], geom)
     # Mesh nodes should all be inside/on the fluid domain -- boundary nodes

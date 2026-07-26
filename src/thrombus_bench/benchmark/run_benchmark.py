@@ -118,6 +118,8 @@ def _time_mechanistic_solve(params_row: np.ndarray, physio_base: dict, mesh_cfg:
         vessel_diameter_mm=float(sample["vessel_diameter_mm"]),
         aneurysm_diameter_mm=float(sample["aneurysm_diameter_mm"]),
         vessel_length_mm=50.0,
+        sac_height_mm=float(sample["sac_height_mm"]),
+        sac_asymmetry=float(sample["sac_asymmetry"]),
     )
     tagged_mesh = build_aneurysm_mesh(geom, mesh_cfg)
     physio = {k: (dict(v) if isinstance(v, dict) else v) for k, v in physio_base.items()}
@@ -611,14 +613,15 @@ def run_benchmark_continuous(
 
     # Runtime comparison: re-time the mechanistic solver on a few test-set
     # parameter vectors vs. the neural forward pass just timed above.
-    # params_with_time's first 8 entries are the normalized PARAM_ORDER
-    # scalars (the 9th is normalized time, not a mechanistic-solver input).
+    # params_with_time's first len(PARAM_ORDER) entries are the normalized
+    # PARAM_ORDER scalars (the last one is normalized time, not a
+    # mechanistic-solver input).
     n_runtime = min(n_runtime_samples, len(test_ds))
     param_space = ParameterSpace()
     mech_times = np.array(
         [
             _time_mechanistic_solve(
-                denormalize_params(test_batch["params_with_time"][i, :8].numpy(), param_space),
+                denormalize_params(test_batch["params_with_time"][i, : len(PARAM_ORDER)].numpy(), param_space),
                 physio_base, mesh_cfg, mechanistic_end_time_s, mechanistic_dt_s,
             )
             for i in range(n_runtime)

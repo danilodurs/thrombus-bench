@@ -10,7 +10,7 @@ import torch
 
 from thrombus_bench.neural.baselines import ContinuousMeanFieldBaseline, ContinuousNearestNeighborBaseline
 
-GEOMETRY_MM = (7.0, 3.2)  # aneurysm_diameter_mm, vessel_diameter_mm
+GEOMETRY_MM = (7.0, 3.2, 3.5, 0.0)  # aneurysm_diameter_mm, vessel_diameter_mm, sac_height_mm, sac_asymmetry
 
 
 class _FakeContinuousDataset:
@@ -34,14 +34,14 @@ def _item(node_coords: torch.Tensor, field_values: torch.Tensor, params_with_tim
         "node_coords": node_coords,
         "fields": field_values,
         "geometry_mm": torch.tensor(GEOMETRY_MM, dtype=torch.float32),
-        "params_with_time": params_with_time if params_with_time is not None else torch.zeros(9),
+        "params_with_time": params_with_time if params_with_time is not None else torch.zeros(11),
     }
 
 
 def test_continuous_mean_field_baseline_raises_before_fit():
     baseline = ContinuousMeanFieldBaseline()
     try:
-        baseline(torch.zeros(1, 9), torch.zeros(1, 2), torch.zeros(1, dtype=torch.long), torch.zeros(1, 2))
+        baseline(torch.zeros(1, 11), torch.zeros(1, 2), torch.zeros(1, dtype=torch.long), torch.zeros(1, 2))
         assert False, "expected RuntimeError before fit()"
     except RuntimeError:
         pass
@@ -61,7 +61,7 @@ def test_continuous_mean_field_baseline_nearest_single_neighbor_exact_match():
     query = node_coords[1:2]  # exactly the second training point
     batch_index = torch.zeros(1, dtype=torch.long)
     geometry_mm = torch.tensor([GEOMETRY_MM])
-    out = baseline(torch.zeros(1, 9), query, batch_index, geometry_mm)
+    out = baseline(torch.zeros(1, 11), query, batch_index, geometry_mm)
 
     assert torch.allclose(out[0], fields[1])
 
@@ -76,8 +76,8 @@ def test_continuous_mean_field_baseline_ignores_params_with_time():
     batch_index = torch.zeros(1, dtype=torch.long)
     geometry_mm = torch.tensor([GEOMETRY_MM])
 
-    out_zero_params = baseline(torch.zeros(1, 9), query, batch_index, geometry_mm)
-    out_wild_params = baseline(torch.randn(1, 9) * 100.0, query, batch_index, geometry_mm)
+    out_zero_params = baseline(torch.zeros(1, 11), query, batch_index, geometry_mm)
+    out_wild_params = baseline(torch.randn(1, 11) * 100.0, query, batch_index, geometry_mm)
     assert torch.allclose(out_zero_params, out_wild_params)
 
 
@@ -96,7 +96,7 @@ def test_continuous_mean_field_baseline_averages_exactly_k_nearest():
     query = torch.tensor([[0.025, 0.0016]])  # midpoint of the first two, far from the outlier
     batch_index = torch.zeros(1, dtype=torch.long)
     geometry_mm = torch.tensor([GEOMETRY_MM])
-    out = baseline(torch.zeros(1, 9), query, batch_index, geometry_mm)
+    out = baseline(torch.zeros(1, 11), query, batch_index, geometry_mm)
 
     expected = torch.full((11,), 15.0)  # mean(10, 20)
     assert torch.allclose(out[0], expected)
@@ -105,7 +105,7 @@ def test_continuous_mean_field_baseline_averages_exactly_k_nearest():
 def test_continuous_nearest_neighbor_raises_before_fit():
     baseline = ContinuousNearestNeighborBaseline()
     try:
-        baseline(torch.zeros(1, 9), torch.zeros(1, 2), torch.zeros(1, dtype=torch.long), torch.zeros(1, 2))
+        baseline(torch.zeros(1, 11), torch.zeros(1, 2), torch.zeros(1, dtype=torch.long), torch.zeros(1, 2))
         assert False, "expected RuntimeError before fit()"
     except RuntimeError:
         pass
@@ -114,7 +114,7 @@ def test_continuous_nearest_neighbor_raises_before_fit():
 def test_continuous_nearest_neighbor_reproduces_exact_training_match():
     node_coords = torch.tensor([[0.01, 0.001], [0.03, 0.002]])
     fields = torch.stack([torch.full((11,), 1.0), torch.full((11,), 2.0)], dim=0)
-    params_with_time = torch.randn(9)
+    params_with_time = torch.randn(11)
     dataset = _FakeContinuousDataset([_item(node_coords, fields, params_with_time=params_with_time)])
     baseline = ContinuousNearestNeighborBaseline().fit(dataset)
 
@@ -134,14 +134,14 @@ def test_continuous_nearest_neighbor_distinguishes_by_params_at_the_same_locatio
     location, since both are equally close spatially."""
 
     shared_coords = torch.tensor([[0.025, 0.0016]])
-    params_a = torch.zeros(9)
-    params_b = torch.full((9,), 5.0)
+    params_a = torch.zeros(11)
+    params_b = torch.full((11,), 5.0)
     item_a = _item(shared_coords, torch.full((1, 11), 1.0), params_with_time=params_a)
     item_b = _item(shared_coords, torch.full((1, 11), 2.0), params_with_time=params_b)
     dataset = _FakeContinuousDataset([item_a, item_b])
     baseline = ContinuousNearestNeighborBaseline().fit(dataset)
 
-    query_params = torch.full((1, 9), 4.5)  # much closer to params_b than params_a
+    query_params = torch.full((1, 11), 4.5)  # much closer to params_b than params_a
     batch_index = torch.zeros(1, dtype=torch.long)
     geometry_mm = torch.tensor([GEOMETRY_MM])
     out = baseline(query_params, shared_coords, batch_index, geometry_mm)

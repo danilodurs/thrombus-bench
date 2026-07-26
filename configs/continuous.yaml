@@ -51,13 +51,14 @@ data:
   excluded_temporal_channels: [conc_T, conc_PT, conc_FI]
 
 model:
-  # param_dim=9: the existing 8 (data/generate_dataset.PARAM_ORDER) +
+  # param_dim=11: the existing 10 (data/generate_dataset.PARAM_ORDER,
+  # including geometry-redesign Phase 4b's sac_height_mm/sac_asymmetry) +
   # normalized time -- see docs/continuous_surrogate_design.md. This is
   # the one required difference from demo_cpu.yaml's encoder block
-  # (param_dim=8); everything else here is the shared Stage 1 backbone
+  # (param_dim=10); everything else here is the shared Stage 1 backbone
   # (neural/model.SurrogateBackbone) with the same meaning as there.
   encoder:
-    param_dim: 9
+    param_dim: 11
     latent_grid_size: [32, 32]
     hidden_channels: 32
     n_layers: 2

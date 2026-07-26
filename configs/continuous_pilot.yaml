@@ -50,7 +50,7 @@ data:
 
 model:
   encoder:
-    param_dim: 9
+    param_dim: 11
     latent_grid_size: [32, 32]
     hidden_channels: 32
     n_layers: 2

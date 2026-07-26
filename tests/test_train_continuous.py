@@ -25,7 +25,8 @@ def _write_synthetic_sample(path, seed: int, target_value: float, n_nodes: int =
 
     rng = np.random.default_rng(seed)
     params = {
-        "aneurysm_diameter_mm": 7.0, "vessel_diameter_mm": 3.2, "inlet_velocity_cm_s": 47.0,
+        "aneurysm_diameter_mm": 7.0, "vessel_diameter_mm": 3.2, "sac_height_mm": 3.5, "sac_asymmetry": 0.0,
+        "inlet_velocity_cm_s": 47.0,
         "platelet_conc_plt_ml": 3.5e8, "heparin_conc_uM": 2.0, "prothrombin_uM": 1.1,
         "antithrombin_uM": 2.844, "fibrinogen_uM": 7.0,
     }
@@ -61,7 +62,7 @@ def _tiny_continuous_cfg() -> dict:
         "seed": 0,
         "data": {"points_per_sample": None, "excluded_temporal_channels": list(DEFAULT_EXCLUDED_TEMPORAL_CHANNELS)},
         "model": {
-            "encoder": {"param_dim": 9, "latent_grid_size": (8, 8), "hidden_channels": 8, "n_layers": 1},
+            "encoder": {"param_dim": 11, "latent_grid_size": (8, 8), "hidden_channels": 8, "n_layers": 1},
             "operator_core": {"type": "fno", "fno": {"modes": 2, "hidden_channels": 8, "n_layers": 1}},
             "coordinate_encoding": {"num_frequency_bands": 4},
             "coordinate_decoder": {"mlp_hidden": 16, "n_residual_blocks": 1},

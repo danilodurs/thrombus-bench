@@ -25,14 +25,17 @@ and Phase 1's `FourierFeatureEncoding` expect `[-1, 1]`-normalized input
 (matching `encoder.py`'s `_coordinate_grid` convention -- `-1`/`+1` are the
 corner pixel *centers*, hence `grid_sample(..., align_corners=True)`
 below). Each sample's own analytic bounding box is used for this
-normalization -- `x in [0, L]`, `y in [0, D + R]` (`mesh.py`'s domain
-always starts at the origin; `vessel_length_mm` is fixed at
-`VESSEL_LENGTH_MM` everywhere in this project, never a sampled parameter,
-see `data/generate_dataset.py::_run_one_sample`) -- rather than a single
-shared physical scale across samples, since different samples' domains
-have different physical extents (in particular different `D + R` sac
-heights) and the legacy raster path (`generate_dataset._rasterize`)
-already used this same per-sample-bounding-box convention.
+normalization -- `x in [0, L]`, `y in [0, D + b]` where `b` is
+`sac_height_mm` (`mesh.py`'s domain always starts at the origin;
+`vessel_length_mm` is fixed at `VESSEL_LENGTH_MM` everywhere in this
+project, never a sampled parameter, see
+`data/generate_dataset.py::_run_one_sample`) -- rather than a single shared
+physical scale across samples, since different samples' domains have
+different physical extents (in particular different `D + b` sac heights,
+geometry-redesign Phase 4b) and the legacy raster path
+(`generate_dataset._rasterize`) already used this same
+per-sample-bounding-box convention (with `b == R` before Phase 4b's
+sac_height_mm/sac_asymmetry generalization).
 
 Batching convention for ragged query points
 ------------------------------------------------
@@ -125,18 +128,19 @@ def normalize_query_points_to_unit_box(
     baselines, Phase 6) doesn't reimplement it separately.
 
     `query_points_m`: `(total_points, 2)` raw physical `(x, y)` meters.
-    `batch_index`: `(total_points,)`. `geometry_mm`: `(batch, 2)` raw
-    `[aneurysm_diameter_mm, vessel_diameter_mm]`. Returns `(total_points,
-    2)` in `[-1, 1]`.
+    `batch_index`: `(total_points,)`. `geometry_mm`: `(batch, 4)` raw
+    `[aneurysm_diameter_mm, vessel_diameter_mm, sac_height_mm,
+    sac_asymmetry]` (`data.generate_dataset.N_GEOMETRY_PARAMS` leading
+    entries of `PARAM_ORDER`). Returns `(total_points, 2)` in `[-1, 1]`.
     """
 
     D_m = geometry_mm[:, 1] * 1.0e-3
-    R_m = geometry_mm[:, 0] * 0.5e-3
+    b_m = geometry_mm[:, 2] * 1.0e-3
     L_m = query_points_m.new_full(D_m.shape, vessel_length_mm * 1.0e-3)
 
-    D_pt, R_pt, L_pt = D_m[batch_index], R_m[batch_index], L_m[batch_index]
+    D_pt, b_pt, L_pt = D_m[batch_index], b_m[batch_index], L_m[batch_index]
     x_norm = 2.0 * query_points_m[:, 0] / L_pt - 1.0
-    y_norm = 2.0 * query_points_m[:, 1] / (D_pt + R_pt) - 1.0
+    y_norm = 2.0 * query_points_m[:, 1] / (D_pt + b_pt) - 1.0
     return torch.stack([x_norm, y_norm], dim=-1)
 
 
@@ -151,8 +155,8 @@ def _sdf_per_point(
     ragged batch: `signed_distance_to_wall` takes one `GeometryConfig` for
     its whole input array, and different samples in a batch generally have
     different geometries (sampled `aneurysm_diameter_mm`/
-    `vessel_diameter_mm`) -- batch sizes here are small (e.g.
-    `optim.batch_size: 16`), so this is cheap.
+    `vessel_diameter_mm`/`sac_height_mm`/`sac_asymmetry`) -- batch sizes
+    here are small (e.g. `optim.batch_size: 16`), so this is cheap.
 
     Runs entirely on CPU via numpy and returns a plain (non-`requires_grad`)
     tensor -- consistent with the SDF having no learnable parameters and
@@ -174,6 +178,8 @@ def _sdf_per_point(
             vessel_diameter_mm=float(geometry_np[b, 1]),
             aneurysm_diameter_mm=float(geometry_np[b, 0]),
             vessel_length_mm=vessel_length_mm,
+            sac_height_mm=float(geometry_np[b, 2]),
+            sac_asymmetry=float(geometry_np[b, 3]),
         )
         out[mask] = signed_distance_to_wall(xs_np[mask], ys_np[mask], geom)
     return torch.from_numpy(out).to(device=device, dtype=dtype)
@@ -269,16 +275,17 @@ class ContinuousThrombusSurrogate(nn.Module):
         geometry_mm: torch.Tensor,
     ) -> torch.Tensor:
         """
-        `params_with_time`: `(batch, 9)` -- `SurrogateBackbone`/encoder
-        input, already normalized (existing 8 `data/generate_dataset.
-        PARAM_ORDER` scalars + normalized time, per the design summary).
+        `params_with_time`: `(batch, 11)` -- `SurrogateBackbone`/encoder
+        input, already normalized (10 `data/generate_dataset.PARAM_ORDER`
+        scalars + normalized time, per the design summary).
         `query_points_m`: `(total_points, 2)` -- raw physical `(x, y)` in
         meters. `batch_index`: `(total_points,)` long, values in `[0,
         batch)`, ragged counts per sample allowed. `geometry_mm`: `(batch,
-        2)` -- raw (unnormalized) `[aneurysm_diameter_mm,
-        vessel_diameter_mm]` per sample, needed here (not derivable from
-        `params_with_time`, which is normalized) for the analytic SDF and
-        per-sample bounding-box coordinate normalization.
+        4)` -- raw (unnormalized) `[aneurysm_diameter_mm,
+        vessel_diameter_mm, sac_height_mm, sac_asymmetry]` per sample,
+        needed here (not derivable from `params_with_time`, which is
+        normalized) for the analytic SDF and per-sample bounding-box
+        coordinate normalization.
 
         Returns `(total_points, output_channels)`.
         """

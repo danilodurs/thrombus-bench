@@ -20,7 +20,7 @@ def _tiny_continuous_training_cfg() -> dict:
         "seed": 0,
         "data": {"points_per_sample": None, "excluded_temporal_channels": ["conc_T", "conc_PT", "conc_FI"]},
         "model": {
-            "encoder": {"param_dim": 9, "latent_grid_size": (8, 8), "hidden_channels": 8, "n_layers": 1},
+            "encoder": {"param_dim": 11, "latent_grid_size": (8, 8), "hidden_channels": 8, "n_layers": 1},
             "operator_core": {"type": "fno", "fno": {"modes": 2, "hidden_channels": 8, "n_layers": 1}},
             "coordinate_encoding": {"num_frequency_bands": 4},
             "coordinate_decoder": {"mlp_hidden": 16, "n_residual_blocks": 1},
@@ -39,7 +39,7 @@ def _tiny_grid_training_cfg() -> dict:
     return {
         "seed": 0,
         "model": {
-            "encoder": {"param_dim": 8, "latent_grid_size": (16, 16), "hidden_channels": 8, "n_layers": 1},
+            "encoder": {"param_dim": 10, "latent_grid_size": (16, 16), "hidden_channels": 8, "n_layers": 1},
             "operator_core": {"type": "fno", "fno": {"modes": 2, "hidden_channels": 8, "n_layers": 1}},
             "output_channels": 11,
             "predict_M_at_wall": False,

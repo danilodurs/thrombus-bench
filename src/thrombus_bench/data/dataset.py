@@ -7,7 +7,14 @@ rasterized onto a fixed-resolution grid there -- see its docstring) and
 expose them as a `torch.utils.data.Dataset` yielding, per sample:
 
 * `params`: the sampled parameter vector (geometry + physiology + inlet
-  velocity), shape `(8,)`, order matching `generate_dataset.PARAM_ORDER`.
+  velocity), shape `(10,)`, order matching `generate_dataset.PARAM_ORDER`
+  (the leading `generate_dataset.N_GEOMETRY_PARAMS` = 4 entries --
+  `aneurysm_diameter_mm`, `vessel_diameter_mm`, `sac_height_mm`,
+  `sac_asymmetry` -- are geometry; `PointCloudThrombusDataset.geometry_mm`
+  below is exactly this prefix). Datasets generated before the
+  geometry-redesign Phase 4b schema change have 8-entry `params` arrays and
+  are rejected with a clear error (`_EXPECTED_N_PARAMS` check below) rather
+  than silently misread -- regenerate them, don't try to reuse them.
   Min-max normalized to `[-1, 1]` per `sampler.normalize_params` (based on
   `sampler.DEFAULT_RANGES`, the same physical ranges used for sampling) --
   raw values span wildly different scales (e.g. `platelet_conc_plt_ml`
@@ -104,6 +111,33 @@ FIELD_NAMES = ("velocity_x", "velocity_y", "conc_RP", "conc_AP", "conc_APR", "co
 # re-declared, so the two can't drift apart).
 _SPECIES_NAMES = tuple(name[len("conc_") :] for name in FIELD_NAMES if name.startswith("conc_"))
 
+# Duplicated from `generate_dataset.PARAM_ORDER`/`N_GEOMETRY_PARAMS` rather
+# than imported: `generate_dataset.py` already imports `FIELD_NAMES` from
+# this module, so importing back from it here would be circular. Kept in
+# sync manually -- `test_pointcloud_sample.py`/`test_dataset_qc_fields.py`
+# cross-check both modules agree.
+_EXPECTED_N_PARAMS = 10
+_N_GEOMETRY_PARAMS = 4
+
+
+def _check_params_schema(params_raw: np.ndarray, path: str) -> None:
+    """Fail loudly, not silently, on a pre-geometry-redesign-Phase-4b
+    dataset (8-entry `params`, no `sac_height_mm`/`sac_asymmetry`) -- see
+    module docstring. Without this, `params_raw[:_N_GEOMETRY_PARAMS]` would
+    silently take `[aneurysm_diameter_mm, vessel_diameter_mm,
+    inlet_velocity_cm_s, platelet_conc_plt_ml]` as if the last two were
+    `sac_height_mm`/`sac_asymmetry` -- a real, silent misinterpretation risk
+    `docs/geometry_redesign_assessment.md` Section 8 explicitly flags."""
+
+    if params_raw.shape[-1] != _EXPECTED_N_PARAMS:
+        raise ValueError(
+            f"{path}: params array has {params_raw.shape[-1]} entries, expected "
+            f"{_EXPECTED_N_PARAMS} (data.generate_dataset.PARAM_ORDER, post geometry-redesign "
+            "Phase 4b). This looks like a dataset generated before the sac_height_mm/"
+            "sac_asymmetry schema change -- regenerate it with the current "
+            "thrombus-generate-dataset rather than reusing it."
+        )
+
 
 def field_to_log(x):
     """sign(x) * log1p(|x|); see module docstring."""
@@ -131,6 +165,7 @@ class ThrombusSurrogateDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         data = np.load(self.files[idx])
+        _check_params_schema(data["params"], self.files[idx])
         fields = np.stack([data[name] for name in FIELD_NAMES], axis=0).astype(np.float32)
         fields = field_to_log(fields)
         params_normalized = normalize_params(data["params"], self.param_space).astype(np.float32)
@@ -198,12 +233,14 @@ class PointCloudThrombusDataset(Dataset):
       itself does not need it, since 0 is already the correct off-wall
       target -- mirrors `ThrombusSurrogateDataset`'s `M_at_wall` raster,
       which is 0-filled off the wall band with no separate mask either).
-    * `geometry_mm`: `(2,)` float32 -- raw (unnormalized)
-      `[aneurysm_diameter_mm, vessel_diameter_mm]` for this sample (i.e.
-      `data["params"][:2]`, `PARAM_ORDER`'s first two entries) -- needed
-      by `neural.coordinate_decoder.ContinuousThrombusSurrogate` for its
-      analytic-SDF and coordinate-normalization terms, which require
-      physical geometry rather than `params_with_time`'s normalized form.
+    * `geometry_mm`: `(4,)` float32 -- raw (unnormalized)
+      `[aneurysm_diameter_mm, vessel_diameter_mm, sac_height_mm,
+      sac_asymmetry]` for this sample (i.e. `data["params"][:4]`,
+      `PARAM_ORDER`'s first four entries -- `generate_dataset.
+      N_GEOMETRY_PARAMS`) -- needed by `neural.coordinate_decoder.
+      ContinuousThrombusSurrogate` for its analytic-SDF and
+      coordinate-normalization terms, which require physical geometry
+      rather than `params_with_time`'s normalized form.
     * `thrombin_fibrin_reliable`: bool scalar -- this checkpoint's entry
       from `thrombin_fibrin_reliable_at_checkpoint` (Phase 1), for the
       per-checkpoint channel-exclusion-by-default mechanism (`docs/
@@ -250,6 +287,7 @@ class PointCloudThrombusDataset(Dataset):
         data = np.load(self.files[file_idx])
 
         params_raw = data["params"]
+        _check_params_schema(params_raw, self.files[file_idx])
         params_normalized = normalize_params(params_raw, self.param_space).astype(np.float32)
         time_s = data["time_s"]
         t_norm = np.float32(2.0 * (time_s[checkpoint_idx] / time_s[-1]) - 1.0)
@@ -293,7 +331,7 @@ class PointCloudThrombusDataset(Dataset):
             m_at_target = m_at_target[chosen]
             is_wall = is_wall[chosen]
 
-        geometry_mm = params_raw[:2].astype(np.float32)
+        geometry_mm = params_raw[:_N_GEOMETRY_PARAMS].astype(np.float32)
         reliable = bool(data["thrombin_fibrin_reliable_at_checkpoint"][checkpoint_idx])
 
         return {

@@ -82,8 +82,19 @@ from .sampler import (
 )
 
 _ALL_SPECIES = ("RP", "AP", "APR", "APS", "T", "AT", "PT", "FG", "FI")
+# sac_height_mm/sac_asymmetry (geometry-redesign Phase 4b) are inserted right
+# after aneurysm_diameter_mm/vessel_diameter_mm, not appended at the end, to
+# preserve the "leading N entries are geometry" convention data/dataset.py's
+# PointCloudThrombusDataset relies on (params_raw[:N_GEOMETRY_PARAMS]) -- see
+# docs/geometry_redesign_assessment.md Section 8. This is a breaking on-disk
+# schema change: datasets generated before this change have 8-entry `params`
+# arrays and must be regenerated, not migrated (data/dataset.py raises a
+# clear error on the length mismatch rather than silently misinterpreting
+# the array).
+N_GEOMETRY_PARAMS = 4
 PARAM_ORDER = (
-    "aneurysm_diameter_mm", "vessel_diameter_mm", "inlet_velocity_cm_s", "platelet_conc_plt_ml",
+    "aneurysm_diameter_mm", "vessel_diameter_mm", "sac_height_mm", "sac_asymmetry",
+    "inlet_velocity_cm_s", "platelet_conc_plt_ml",
     "heparin_conc_uM", "prothrombin_uM", "antithrombin_uM", "fibrinogen_uM",
 )
 
@@ -230,7 +241,7 @@ def _build_pointcloud_sample(
 
     Schema (one `.npz` per sample, mirroring `_run_one_sample`'s dict):
 
-    - ``params``: ``(8,)`` float64 -- unchanged, `PARAM_ORDER`.
+    - ``params``: ``(len(PARAM_ORDER),)`` float64 -- `PARAM_ORDER` order.
     - ``node_coords``: ``(n_nodes, 2)`` float64 -- FEM mesh vertex
       coordinates (meters), `tagged_mesh.mesh.p.T`.
     - ``triangles``: ``(n_triangles, 3)`` int32 -- mesh connectivity
@@ -409,6 +420,8 @@ def _run_one_sample(
         vessel_diameter_mm=sample["vessel_diameter_mm"],
         aneurysm_diameter_mm=sample["aneurysm_diameter_mm"],
         vessel_length_mm=50.0,
+        sac_height_mm=sample["sac_height_mm"],
+        sac_asymmetry=sample["sac_asymmetry"],
     )
     tagged_mesh = build_aneurysm_mesh(geom, mesh_cfg)
 

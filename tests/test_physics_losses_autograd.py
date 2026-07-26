@@ -126,7 +126,14 @@ def test_mass_conservation_penalty_autograd_does_not_mutate_input():
 
 
 def test_sample_collocation_points_are_strictly_inside_fluid_domain():
-    geometry_mm = torch.tensor([[7.0, 3.2], [10.0, 4.0]])
+    """Uses genuinely asymmetric/tall sac shapes (not circle-equivalent
+    defaults) specifically to exercise the geometry-redesign Phase 4b fix:
+    sample_collocation_points must score membership against each sample's
+    *actual* sac_height_mm/sac_asymmetry, not silently fall back to a plain
+    circle -- this test's own independent SDF re-check below would disagree
+    with the sampler's accepted points if that fix regressed."""
+
+    geometry_mm = torch.tensor([[7.0, 3.2, 5.0, 0.3], [10.0, 4.0, 6.0, -0.4]])
     query_points_m, batch_index = sample_collocation_points(
         geometry_mm, vessel_length_mm=50.0, n_points_per_sample=20, rng=np.random.default_rng(0)
     )
@@ -138,8 +145,13 @@ def test_sample_collocation_points_are_strictly_inside_fluid_domain():
     assert int((batch_index == 0).sum()) == 20
     assert int((batch_index == 1).sum()) == 20
 
-    for b, (aneurysm_mm, vessel_mm) in enumerate([(7.0, 3.2), (10.0, 4.0)]):
-        geom = GeometryConfig(vessel_diameter_mm=vessel_mm, aneurysm_diameter_mm=aneurysm_mm, vessel_length_mm=50.0)
+    for b, (aneurysm_mm, vessel_mm, sac_height_mm, sac_asymmetry) in enumerate(
+        [(7.0, 3.2, 5.0, 0.3), (10.0, 4.0, 6.0, -0.4)]
+    ):
+        geom = GeometryConfig(
+            vessel_diameter_mm=vessel_mm, aneurysm_diameter_mm=aneurysm_mm, vessel_length_mm=50.0,
+            sac_height_mm=sac_height_mm, sac_asymmetry=sac_asymmetry,
+        )
         pts = query_points_m[batch_index == b].numpy()
         sdf = signed_distance_to_wall(pts[:, 0], pts[:, 1], geom)
         assert np.all(sdf > 0.0)
@@ -147,7 +159,7 @@ def test_sample_collocation_points_are_strictly_inside_fluid_domain():
 
 def _tiny_continuous_cfg() -> dict:
     return {
-        "encoder": {"param_dim": 9, "latent_grid_size": (8, 8), "hidden_channels": 8, "n_layers": 1},
+        "encoder": {"param_dim": 11, "latent_grid_size": (8, 8), "hidden_channels": 8, "n_layers": 1},
         "operator_core": {"type": "fno", "fno": {"modes": 2, "hidden_channels": 8, "n_layers": 1}},
         "coordinate_encoding": {"num_frequency_bands": 4},
         "coordinate_decoder": {"mlp_hidden": 16, "n_residual_blocks": 1},
@@ -169,8 +181,8 @@ def test_gradient_flows_to_model_parameters_through_autograd_mass_conservation_l
     torch.manual_seed(0)
     model = ContinuousThrombusSurrogate(_tiny_continuous_cfg())
     batch = 2
-    params_with_time = torch.randn(batch, 9)
-    geometry_mm = torch.tensor([[7.0, 3.2], [10.0, 4.0]])
+    params_with_time = torch.randn(batch, 11)
+    geometry_mm = torch.tensor([[7.0, 3.2, 3.5, 0.0], [10.0, 4.0, 5.0, 0.2]])
 
     loss = continuous_mass_conservation_loss(
         model, params_with_time, geometry_mm, n_points_per_sample=8,

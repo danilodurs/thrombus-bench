@@ -35,6 +35,8 @@ def _small_sample() -> dict:
     return {
         "aneurysm_diameter_mm": 7.0,
         "vessel_diameter_mm": 3.2,
+        "sac_height_mm": 3.5,
+        "sac_asymmetry": 0.0,
         "inlet_velocity_cm_s": 47.0,
         "platelet_conc_plt_ml": 3.5e8,
         "heparin_conc_uM": 2.0,
@@ -71,6 +73,8 @@ def test_roundtrip_matches_mechanistic_solver_raw_output_no_interpolation(physio
         vessel_diameter_mm=sample["vessel_diameter_mm"],
         aneurysm_diameter_mm=sample["aneurysm_diameter_mm"],
         vessel_length_mm=50.0,
+        sac_height_mm=sample["sac_height_mm"],
+        sac_asymmetry=sample["sac_asymmetry"],
     )
     tagged_mesh = build_aneurysm_mesh(geom, {"target_num_elements": 150})
     physio_run = {k: (dict(v) if isinstance(v, dict) else v) for k, v in physio.items()}
@@ -113,14 +117,17 @@ def test_params_with_time_normalization_matches_sampler_convention(physio, tmp_p
     item = dataset[0]
 
     expected_params = normalize_params(result["params"], ParameterSpace()).astype(np.float32)
-    np.testing.assert_allclose(item["params_with_time"][:8].numpy(), expected_params, rtol=1e-5)
+    np.testing.assert_allclose(item["params_with_time"][:10].numpy(), expected_params, rtol=1e-5)
     # n_snapshots=1: the one checkpoint IS the final time -> t_norm == 1.0 exactly.
-    assert item["params_with_time"][8].item() == pytest.approx(1.0)
+    assert item["params_with_time"][10].item() == pytest.approx(1.0)
 
-    assert item["geometry_mm"].shape == (2,)
+    assert item["geometry_mm"].shape == (4,)
     aneurysm_idx, vessel_idx = PARAM_ORDER.index("aneurysm_diameter_mm"), PARAM_ORDER.index("vessel_diameter_mm")
+    sac_height_idx, sac_asymmetry_idx = PARAM_ORDER.index("sac_height_mm"), PARAM_ORDER.index("sac_asymmetry")
     assert item["geometry_mm"][0].item() == pytest.approx(result["params"][aneurysm_idx])
     assert item["geometry_mm"][1].item() == pytest.approx(result["params"][vessel_idx])
+    assert item["geometry_mm"][2].item() == pytest.approx(result["params"][sac_height_idx])
+    assert item["geometry_mm"][3].item() == pytest.approx(result["params"][sac_asymmetry_idx])
 
 
 def test_n_snapshots_one_needs_no_special_casing(physio, tmp_path):
@@ -143,7 +150,7 @@ def test_multiple_checkpoints_produce_one_dataset_item_each(physio, tmp_path):
     dataset = PointCloudThrombusDataset(str(tmp_path), "train")
     assert len(dataset) == n_snapshots
 
-    t_norms = [dataset[i]["params_with_time"][8].item() for i in range(len(dataset))]
+    t_norms = [dataset[i]["params_with_time"][10].item() for i in range(len(dataset))]
     assert t_norms == sorted(t_norms), "checkpoints should be indexed in time order"
     assert t_norms[-1] == pytest.approx(1.0)
     assert all(t > -1.0 for t in t_norms), "no true t=0 checkpoint exists (see generate_dataset docstring)"
@@ -197,8 +204,8 @@ def test_m_at_target_is_zero_off_wall_and_matches_wall_values_on_wall(physio, tm
 def test_collate_fn_produces_correctly_shaped_ragged_batch():
     def fake_item(n_points: int, tag: float) -> dict:
         return {
-            "params_with_time": torch.full((9,), tag),
-            "geometry_mm": torch.full((2,), tag),
+            "params_with_time": torch.full((11,), tag),
+            "geometry_mm": torch.full((4,), tag),
             "thrombin_fibrin_reliable": torch.tensor(tag > 0),
             "node_coords": torch.full((n_points, 2), tag),
             "fields": torch.full((n_points, len(FIELD_NAMES)), tag),
@@ -211,8 +218,8 @@ def test_collate_fn_produces_correctly_shaped_ragged_batch():
     collated = pointcloud_collate_fn(batch)
 
     total = sum(counts)
-    assert collated["params_with_time"].shape == (3, 9)
-    assert collated["geometry_mm"].shape == (3, 2)
+    assert collated["params_with_time"].shape == (3, 11)
+    assert collated["geometry_mm"].shape == (3, 4)
     assert collated["thrombin_fibrin_reliable"].shape == (3,)
     assert collated["node_coords"].shape == (total, 2)
     assert collated["fields"].shape == (total, len(FIELD_NAMES))

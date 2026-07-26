@@ -70,7 +70,7 @@ model:
   # must match the grid_size used by data/generate_dataset.py to rasterize
   # the mechanistic solver's output (default 32x32; see its --grid-size flag).
   encoder:
-    param_dim: 8            # data/generate_dataset.PARAM_ORDER: [aneurysm_d, vessel_d, v_in, platelet_conc, heparin_conc, PT, AT, FG]
+    param_dim: 10           # data/generate_dataset.PARAM_ORDER: [aneurysm_d, vessel_d, sac_height, sac_asymmetry, v_in, platelet_conc, heparin_conc, PT, AT, FG]
     latent_grid_size: [32, 32]
     hidden_channels: 32
     n_layers: 2
