@@ -361,6 +361,16 @@ def _write_report(
         "it isn't inflated by easy, mostly-constant background reconstruction; "
         "the all-cells number is kept alongside it for comparison.",
         "",
+        "**This aggregate includes `conc_T`/`conc_PT`/`conc_FI` unfiltered.** "
+        "Unlike the continuous path's `train_continuous` (which zero-weights "
+        "those channels by default via `data.excluded_temporal_channels`), the "
+        "grid path's `train()` has no channel-exclusion mechanism and trains "
+        "on all 11 field channels unconditionally -- so this checkpoint's "
+        "`conc_T`/`conc_PT`/`conc_FI` predictions, and therefore some share of "
+        "the RMSE above, reflect the known concentration-cap unreliability "
+        'described in README.md "Known limitations" rather than a calibrated '
+        "thrombin/fibrin pathway.",
+        "",
         "## Model comparison (field RMSE, log-space)",
         "",
         "| Model | Test (all cells) | Test (fluid only) | Edge holdout (all cells) | Edge holdout (fluid only) |",

@@ -103,6 +103,27 @@ def test_write_report_thrombus_overlap_none_shows_not_computed(tmp_path):
     assert "Not computed" in report
 
 
+def test_write_report_documents_unfiltered_thrombin_fibrin_channels(tmp_path):
+    """The grid path's train() has no analogue to train_continuous's
+    excluded_temporal_channels -- report.md must say so near the headline
+    accuracy number, not just in the conditional IoU section."""
+
+    _write_report(
+        str(tmp_path),
+        accuracy={"overall": 1.0, "fluid_only": 1.0},
+        runtime={"mechanistic_mean_s": 1.0, "neural_mean_s": 0.01, "speedup_factor": 100.0},
+        edge_holdout_degradation={"test": {"overall": 1.0}, "edge_holdout": {"overall": 1.0}, "degradation_ratio": 1.0},
+        ece=0.1,
+        model_comparison={"FNO surrogate": {"test": {"overall": 1.0, "fluid_only": 1.0}, "edge_holdout": {"overall": 1.0, "fluid_only": 1.0}}},
+        thrombus_overlap=None,
+        n_test=6, n_edge_holdout=6,
+    )
+    report = (tmp_path / "report.md").read_text()
+    assert "conc_T" in report and "conc_PT" in report and "conc_FI" in report
+    assert "unfiltered" in report
+    assert report.index("Accuracy") < report.index("conc_T") < report.index("Model comparison")
+
+
 def test_write_report_thrombus_overlap_present_shows_iou(tmp_path):
     _write_report(
         str(tmp_path),
